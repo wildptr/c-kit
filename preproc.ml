@@ -17,7 +17,7 @@ type replace_token =
 
 type macro_def =
   | ObjLike of replace_token list
-  | FunLike of replace_token list
+  | FunLike of int * replace_token list
 
 type state = {
   lexbuf : Lexing.lexbuf;
@@ -86,6 +86,7 @@ let parse_macro_arg st =
     | Comma -> if depth = 0 then acc else loop depth (get st :: acc)
     | LParen -> loop (depth+1) (get st :: acc)
     | RParen -> if depth = 0 then acc else loop (depth-1) (get st :: acc)
+    | EOF -> error "unterminated macro argument"
     | _ -> loop depth (get st :: acc)
   in
   loop 0 [] |> List.rev
@@ -200,16 +201,16 @@ let rec lex st =
       match get st with
       | { payload = LParen; ws = false; _ } ->
         (* function-like macro *)
-        let param_map =
+        let param_map, arity =
           match get st with
-          | { payload = RParen; _ } -> Map.String.empty
+          | { payload = RParen; _ } -> Map.String.empty, 0
           | { payload = Ident s; _ } ->
             let rec loop m i =
               match (get st).payload with
               | Comma ->
                 let s = expect_ident st in
                 loop (Map.String.add s i m) (i+1)
-              | RParen -> m
+              | RParen -> m, i
               | _ -> error "#define"
             in
             loop (Map.String.singleton s 0) 1
@@ -219,7 +220,7 @@ let rec lex st =
           parse_macro_body param_map
             (parse_token_list st |> List.map (fun t -> Verbatim t))
         in
-        FunLike body
+        FunLike (arity, body)
       | u ->
         (* object-like macro *)
         enqueue u st;
@@ -239,8 +240,7 @@ let rec lex st =
     when not (List.mem s t.no_expand_list) && Hashtbl.mem st.macro_tab s ->
     let expand arg_tab body =
       let l' =
-        body |> List.map (subst_token s t.no_expand_list arg_tab) |>
-        List.concat |> expand_token_list st.macro_tab
+        body |> List.map (subst_token s t.no_expand_list arg_tab) |> List.concat
       in
       begin match l' with
         | [] -> ()
@@ -251,19 +251,26 @@ let rec lex st =
     in
     begin match Hashtbl.find st.macro_tab s with
       | ObjLike body -> expand [||] body
-      | FunLike body ->
+      | FunLike (arity, body) ->
         if match_token LParen st then
           let arg_tab =
-            parse_macro_arg_list st |>
-            List.map (expand_token_list st.macro_tab) |>
-            Array.of_list
+            let args = parse_macro_arg_list st in
+            let n_arg = List.length args in
+            if n_arg = arity then
+              args |> List.map (expand_token_list st.macro_tab) |> Array.of_list
+            else if n_arg = 0 && arity = 1 then [|[]|]
+            else error "wrong number of macro arguments"
           in
+          (* arg_tab |> Array.iteri begin fun i l ->
+            Format.printf "[%d]=‘%a’@." i pp_token_list l
+          end; *)
           expand arg_tab body
         else t
     end
   | _ -> t
 
 and expand_token_list macro_tab l =
+  (* Format.printf "expanding ‘%a’@." pp_token_list l; *)
   let st = {
     lexbuf = Lexing.from_string "";
     lex_state = Lexer.init_state ();
@@ -275,6 +282,9 @@ and expand_token_list macro_tab l =
     if t.payload = EOF then acc else loop (t::acc)
   in
   loop [] |> List.rev
+  (* |> fun result ->
+  Format.printf "‘%a’ → ‘%a’@." pp_token_list l pp_token_list result;
+  result *)
 
 let () =
   Printexc.record_backtrace true;
@@ -282,7 +292,10 @@ let () =
   let st = init_state lexbuf in
   let rec loop () =
     let t = lex st in
-    Printf.printf "%d: %s ‘%s’\n" t.pos (show_token t.payload) t.text;
+(*     Printf.printf "%d: %s ‘%s’\n" t.pos (show_token t.payload) t.text; *)
+    if t.ws then print_char ' ';
+    print_string t.text;
     if t.payload = EOF then () else loop ()
   in
-  loop ()
+  loop ();
+  print_char '\n'
