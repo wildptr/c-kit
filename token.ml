@@ -58,4 +58,8 @@ type token =
   | UNDEF
   | EOL
   | SIZEOF
+  | IFDEF
+  | IFNDEF
+  | ELSE
+  | ENDIF
 [@@deriving show]

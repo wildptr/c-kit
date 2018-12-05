@@ -1,11 +1,18 @@
 open Batteries
 open Token
 
+module H =
+  Hashtbl.Make(struct
+    type t = string
+    let equal = (=)
+    let hash = Hashtbl.hash
+  end)
+
 type token = {
   payload : Token.token;
   text : string;
   pos : int;
-  ws : bool;
+  ws : bool; (* has preceding whitespace? *)
   no_expand_list : string list;
 }
 
@@ -22,23 +29,28 @@ type macro_def =
 type state = {
   lexbuf : Lexing.lexbuf;
   lex_state : Lexer.state;
-  macro_tab : (string, macro_def) Hashtbl.t;
-  mutable token_queue : token list
+  macro_tab : macro_def H.t;
+  mutable token_queue : token list;
+  mutable cond_stack : (bool * bool) list
 }
 
 let init_state lexbuf =
   { lexbuf;
     lex_state = Lexer.init_state ();
-    macro_tab = Hashtbl.create 0;
-    token_queue = [] }
+    macro_tab = H.create 0;
+    token_queue = [];
+    cond_stack = [] }
 
-let lex_raw st =
-  let payload = Lexer.initial st.lex_state st.lexbuf in
+let wrap_token payload st =
   let text = Lexing.lexeme st.lexbuf in
   let pos = st.lexbuf.lex_start_pos in
   let ws = st.lex_state.has_whitespace in
   st.lex_state.has_whitespace <- false;
   { payload; text; pos; ws; no_expand_list = [] }
+
+let lex_raw st =
+  let payload = Lexer.initial st.lex_state st.lexbuf in
+  wrap_token payload st
 
 let peek st =
   let t =
@@ -57,12 +69,20 @@ let get st =
   | [] -> lex_raw st
   | hd::tl -> st.token_queue <- tl; hd
 
+(* for parsing preprocessor directives *)
 let parse_token_list st =
   let rec loop acc =
     let t = get st in
     if t.payload = EOL then acc else loop (t::acc)
   in
   loop [] |> List.rev
+
+let skip_to_eol st =
+  let rec loop () =
+    let t = get st in
+    if t.payload <> EOL then loop ()
+  in
+  loop ()
 
 exception Error of string
 
@@ -193,7 +213,15 @@ let rec subst_token macro_name no_expand_list arg_tab = function
     end
 
 let rec lex st =
-  let t = get st in
+  let t =
+    match st.cond_stack with
+    | [] | (true, _) :: _ ->
+      lex_raw st
+    | (false, false) :: _ ->
+      wrap_token (Lexer.skip_to_else_endif st.lex_state st.lexbuf) st
+    | (false, true) :: _ ->
+      wrap_token (Lexer.skip_to_endif st.lex_state st.lexbuf) st
+  in
   match t.payload with
   | DEFINE ->
     let name = expect_ident st in
@@ -230,14 +258,14 @@ let rec lex st =
         in
         ObjLike body
     in
-    Hashtbl.replace st.macro_tab name def;
+    H.replace st.macro_tab name def;
     lex st
   | UNDEF ->
     let name = expect_ident st in
-    Hashtbl.remove st.macro_tab name;
+    H.remove st.macro_tab name;
     lex st
   | Ident s
-    when not (List.mem s t.no_expand_list) && Hashtbl.mem st.macro_tab s ->
+    when not (List.mem s t.no_expand_list) && H.mem st.macro_tab s ->
     let expand arg_tab body =
       let l' =
         body |> List.map (subst_token s t.no_expand_list arg_tab) |> List.concat
@@ -249,7 +277,7 @@ let rec lex st =
       end;
       lex st
     in
-    begin match Hashtbl.find st.macro_tab s with
+    begin match H.find st.macro_tab s with
       | ObjLike body -> expand [||] body
       | FunLike (arity, body) ->
         if match_token LParen st then
@@ -267,6 +295,35 @@ let rec lex st =
           expand arg_tab body
         else t
     end
+  | IFDEF ->
+    begin match parse_token_list st with
+      | [{ payload = Ident name; _ }] ->
+        st.cond_stack <- (H.mem st.macro_tab name, false) :: st.cond_stack
+      | _ -> error "syntax error in #ifdef"
+    end;
+    lex st
+  | IFNDEF ->
+    begin match parse_token_list st with
+      | [{ payload = Ident name; _ }] ->
+        st.cond_stack <- (not (H.mem st.macro_tab name), false) :: st.cond_stack
+      | _ -> error "syntax error in #ifndef"
+    end;
+    lex st
+  | ELSE ->
+    skip_to_eol st;
+    begin match st.cond_stack with
+      | [] -> error "#else without #if"
+      | (_, true) :: _ -> error "duplicate #else"
+      | (cond, false) :: tl -> st.cond_stack <- (not cond, true) :: tl
+    end;
+    lex st
+  | ENDIF ->
+    skip_to_eol st;
+    begin match st.cond_stack with
+      | [] -> error "#endif without #if"
+      | _::tl -> st.cond_stack <- tl
+    end;
+    lex st
   | _ -> t
 
 and expand_token_list macro_tab l =
@@ -276,6 +333,7 @@ and expand_token_list macro_tab l =
     lex_state = Lexer.init_state ();
     macro_tab;
     token_queue = l;
+    cond_stack = []
   } in
   let rec loop acc =
     let t = lex st in
@@ -292,9 +350,9 @@ let () =
   let st = init_state lexbuf in
   let rec loop () =
     let t = lex st in
-(*     Printf.printf "%d: %s ‘%s’\n" t.pos (show_token t.payload) t.text; *)
-    if t.ws then print_char ' ';
-    print_string t.text;
+    Printf.printf "%d: %s ‘%s’\n" t.pos (show_token t.payload) t.text;
+ (* if t.ws then print_char ' ';
+    print_string t.text; *)
     if t.payload = EOF then () else loop ()
   in
   loop ();

@@ -25,6 +25,10 @@ let init_state () =
 
 let directive_map = [
   "define", DEFINE;
+  "else", ELSE;
+  "endif", ENDIF;
+  "ifdef", IFDEF;
+  "ifndef", IFNDEF;
   "include", INCLUDE;
   "undef", UNDEF;
 ] |> BatList.enum |> BatMap.String.of_enum
@@ -153,9 +157,45 @@ and comment = parse
 | _             { comment lexbuf }
 
 and one_line_comment = parse
-| '\n' | eof    { () }
+| '\n'          { next_line lexbuf }
+| eof           { () }
 | _             { one_line_comment lexbuf }
 
 and directive = parse
 | blank         { directive lexbuf }
 | ident as s    { BatMap.String.find s directive_map }
+
+and dir_else_endif = parse
+| blank         { dir_else_endif lexbuf }
+| ident as s    { match s with
+                  | "else" -> Some ELSE
+                  | "endif" -> Some ENDIF
+                  | _ -> None }
+
+and dir_endif = parse
+| blank         { dir_endif lexbuf }
+| ident as s    { match s with
+                  | "endif" -> Some ENDIF
+                  | _ -> None }
+
+and skip_line = parse
+| '\n'          { next_line lexbuf }
+| _             { skip_line lexbuf }
+| eof           { () }
+
+(* invoke only at beginning of line *)
+and skip_to_else_endif s = parse
+| '#'           { match dir_else_endif lexbuf with
+                  | Some t -> s.in_directive <- true; t
+                  | None -> skip_line lexbuf; skip_to_else_endif s lexbuf }
+| '\n'          { next_line lexbuf; skip_to_else_endif s lexbuf }
+| _             { skip_line lexbuf; skip_to_else_endif s lexbuf }
+| eof           { EOF }
+
+and skip_to_endif s = parse
+| '#'           { match dir_endif lexbuf with
+                  | Some t -> s.in_directive <- true; t
+                  | None -> skip_line lexbuf; skip_to_endif s lexbuf }
+| '\n'          { next_line lexbuf; skip_to_endif s lexbuf }
+| _             { skip_line lexbuf; skip_to_endif s lexbuf }
+| eof           { EOF }
