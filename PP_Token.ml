@@ -1,4 +1,4 @@
-type token =
+type pptoken =
   | EOF
   | Ident of string
   | IntLit of string
@@ -53,13 +53,32 @@ type token =
   | Dot
   | Hash
   | HashHash
-  | DEFINE
-  | INCLUDE
-  | UNDEF
   | EOL
-  | SIZEOF
-  | IFDEF
-  | IFNDEF
+
+  | DEFINE
   | ELSE
   | ENDIF
+  | IFDEF
+  | IFNDEF
+  | INCLUDE
+  | UNDEF
+
+(*| BOOL
+  | CHAR
+  | CONST
+  | DOUBLE
+  | ELSE
+  | EXTERN
+  | FLOAT
+  | INT
+  | LONG
+  | SHORT
+  | SIGNED
+  | SIZEOF
+  | STATIC
+  | TYPEDEF
+  | UNSIGNED
+  | VOID
+  | VOLATILE*)
+
 [@@deriving show]

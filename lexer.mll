@@ -1,6 +1,6 @@
 {
 open Lexing
-open Token
+open PP_Token
 
 let next_line lexbuf =
   let pos = lexbuf.lex_curr_p in
@@ -23,6 +23,8 @@ let init_state () =
   { in_directive = false;
     has_whitespace = false }
 
+module M = Map.Make(String)
+
 let directive_map = [
   "define", DEFINE;
   "else", ELSE;
@@ -31,7 +33,7 @@ let directive_map = [
   "ifndef", IFNDEF;
   "include", INCLUDE;
   "undef", UNDEF;
-] |> BatList.enum |> BatMap.String.of_enum
+] |> List.to_seq |> M.of_seq
 
 }
 
@@ -75,15 +77,6 @@ let blank = [' ' '\t' '\012' '\r']+
 let escape = '\\' _
 let hex_escape = '\\' ['x' 'X'] hexdigit+
 let oct_escape = '\\' octdigit octdigit? octdigit?
-
-(* Pragmas that are not parsed by CIL.  We lex them as PRAGMA_LINE tokens *)
-let no_parse_pragma =
-               "warning" | "GCC"
-             (* Solaris-style pragmas:  *)
-             | "ident" | "section" | "option" | "asm" | "use_section" | "weak"
-             | "redefine_extname"
-             | "TCS_align"
-      | "mark"
 
 rule initial s = parse
 | "/*"          { comment lexbuf; initial s lexbuf }
@@ -144,7 +137,6 @@ rule initial s = parse
 | ';'           { Semi }
 | ','           { Comma }
 | '.'           { Dot }
-| "sizeof"      { SIZEOF }
 | ident         { Ident (Lexing.lexeme lexbuf) }
 | eof           { EOF }
 | "##"          { HashHash }
@@ -163,7 +155,7 @@ and one_line_comment = parse
 
 and directive = parse
 | blank         { directive lexbuf }
-| ident as s    { BatMap.String.find s directive_map }
+| ident as s    { M.find s directive_map }
 
 and dir_else_endif = parse
 | blank         { dir_else_endif lexbuf }
@@ -183,12 +175,11 @@ and skip_line = parse
 | _             { skip_line lexbuf }
 | eof           { () }
 
-(* invoke only at beginning of line *)
+(* invoke rules below only at beginning of line *)
 and skip_to_else_endif s = parse
 | '#'           { match dir_else_endif lexbuf with
                   | Some t -> s.in_directive <- true; t
                   | None -> skip_line lexbuf; skip_to_else_endif s lexbuf }
-| '\n'          { next_line lexbuf; skip_to_else_endif s lexbuf }
 | _             { skip_line lexbuf; skip_to_else_endif s lexbuf }
 | eof           { EOF }
 
@@ -196,6 +187,5 @@ and skip_to_endif s = parse
 | '#'           { match dir_endif lexbuf with
                   | Some t -> s.in_directive <- true; t
                   | None -> skip_line lexbuf; skip_to_endif s lexbuf }
-| '\n'          { next_line lexbuf; skip_to_endif s lexbuf }
 | _             { skip_line lexbuf; skip_to_endif s lexbuf }
 | eof           { EOF }

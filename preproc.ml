@@ -1,5 +1,6 @@
-open Batteries
-open Token
+open ExtLib
+open PP_Token
+open Token_Conv
 
 module H =
   Hashtbl.Make(struct
@@ -8,8 +9,10 @@ module H =
     let hash = Hashtbl.hash
   end)
 
+module M = Map.Make(String)
+
 type token = {
-  payload : Token.token;
+  payload : pptoken;
   text : string;
   pos : int;
   ws : bool; (* has preceding whitespace? *)
@@ -27,47 +30,45 @@ type macro_def =
   | FunLike of int * replace_token list
 
 type state = {
-  lexbuf : Lexing.lexbuf;
   lex_state : Lexer.state;
   macro_tab : macro_def H.t;
   mutable token_queue : token list;
   mutable cond_stack : (bool * bool) list
 }
 
-let init_state lexbuf =
-  { lexbuf;
-    lex_state = Lexer.init_state ();
+let init_state () =
+  { lex_state = Lexer.init_state ();
     macro_tab = H.create 0;
     token_queue = [];
     cond_stack = [] }
 
-let wrap_token payload st =
-  let text = Lexing.lexeme st.lexbuf in
-  let pos = st.lexbuf.lex_start_pos in
-  let ws = st.lex_state.has_whitespace in
-  st.lex_state.has_whitespace <- false;
+let wrap_token payload lex_state lexbuf =
+  let text = Lexing.lexeme lexbuf in
+  let pos = lexbuf.lex_start_pos in
+  let ws = lex_state.Lexer.has_whitespace in
+  lex_state.Lexer.has_whitespace <- false;
   { payload; text; pos; ws; no_expand_list = [] }
 
-let lex_raw st =
-  let payload = Lexer.initial st.lex_state st.lexbuf in
-  wrap_token payload st
+let lex_raw lex_state lexbuf =
+  let payload = Lexer.initial lex_state lexbuf in
+  wrap_token payload lex_state lexbuf
 
-let peek st =
+let peek (pp_state, lexbuf) =
   let t =
-    match st.token_queue with
+    match pp_state.token_queue with
     | [] ->
-      let t = lex_raw st in
-      (st.token_queue <- [t]; t)
+      let t = lex_raw pp_state.lex_state lexbuf in
+      pp_state.token_queue <- [t]; t
     | t::_ -> t
   in t.payload
 
-let skip st =
-  st.token_queue <- List.tl st.token_queue
+let skip (pp_state, _) =
+  pp_state.token_queue <- List.tl pp_state.token_queue
 
-let get st =
-  match st.token_queue with
-  | [] -> lex_raw st
-  | hd::tl -> st.token_queue <- tl; hd
+let get (pp_state, lexbuf) =
+  match pp_state.token_queue with
+  | [] -> lex_raw pp_state.lex_state lexbuf
+  | hd::tl -> pp_state.token_queue <- tl; hd
 
 (* for parsing preprocessor directives *)
 let parse_token_list st =
@@ -93,8 +94,8 @@ let expect_ident st =
   | Ident s -> s
   | _ -> error "identifier expected"
 
-let enqueue t st =
-  st.token_queue <- t :: st.token_queue
+let enqueue t (pp_state, _) =
+  pp_state.token_queue <- t :: pp_state.token_queue
 
 let match_token p st =
   let t = get st in
@@ -165,14 +166,14 @@ let concat_token t1 t2 =
 
 let rec parse_macro_body param_map = function
   | Verbatim { payload = Ident s; _ } :: tl
-    when Map.String.mem s param_map ->
-    let i = Map.String.find s param_map in
+    when M.mem s param_map ->
+    let i = M.find s param_map in
     parse_macro_body param_map (Param i :: tl)
   | (Verbatim { payload = Hash; ws; _ } as hd1) ::
     (Verbatim { payload = Ident s; _ } as hd2) :: tl ->
-    begin match Map.String.Exceptionless.find s param_map with
-      | Some i -> Stringify (ws, i) :: parse_macro_body param_map tl
-      | None -> hd1 :: hd2 :: parse_macro_body param_map tl
+    begin match M.find s param_map with
+      | i -> Stringify (ws, i) :: parse_macro_body param_map tl
+      | exception Not_found -> hd1 :: hd2 :: parse_macro_body param_map tl
     end
   | hd1 :: Verbatim { payload = HashHash; _ } :: tl ->
     let hd', tl' =
@@ -212,15 +213,24 @@ let rec subst_token macro_name no_expand_list arg_tab = function
         l1 @ concat_token t1 t2 :: l2
     end
 
-let rec lex st =
+let rec lex (pp_state, lexbuf as st) =
   let t =
-    match st.cond_stack with
-    | [] | (true, _) :: _ ->
-      lex_raw st
-    | (false, false) :: _ ->
-      wrap_token (Lexer.skip_to_else_endif st.lex_state st.lexbuf) st
-    | (false, true) :: _ ->
-      wrap_token (Lexer.skip_to_endif st.lex_state st.lexbuf) st
+    match pp_state.token_queue with
+    | [] ->
+      begin match pp_state.cond_stack with
+        | [] | (true, _) :: _ ->
+          lex_raw pp_state.lex_state lexbuf
+        | (false, false) :: _ ->
+          let lex_state = pp_state.lex_state in
+          let payload = Lexer.skip_to_else_endif lex_state lexbuf in
+          wrap_token payload lex_state lexbuf
+        | (false, true) :: _ ->
+          let lex_state = pp_state.lex_state in
+          let payload = Lexer.skip_to_endif lex_state lexbuf in
+          wrap_token payload lex_state lexbuf
+      end
+    | hd :: tl ->
+      let () = pp_state.token_queue <- tl in hd
   in
   match t.payload with
   | DEFINE ->
@@ -231,17 +241,17 @@ let rec lex st =
         (* function-like macro *)
         let param_map, arity =
           match get st with
-          | { payload = RParen; _ } -> Map.String.empty, 0
+          | { payload = RParen; _ } -> M.empty, 0
           | { payload = Ident s; _ } ->
             let rec loop m i =
               match (get st).payload with
               | Comma ->
                 let s = expect_ident st in
-                loop (Map.String.add s i m) (i+1)
+                loop (M.add s i m) (i+1)
               | RParen -> m, i
               | _ -> error "#define"
             in
-            loop (Map.String.singleton s 0) 1
+            loop (M.singleton s 0) 1
           | _ -> error "#define"
         in
         let body =
@@ -253,19 +263,19 @@ let rec lex st =
         (* object-like macro *)
         enqueue u st;
         let body =
-          parse_macro_body Map.String.empty
+          parse_macro_body M.empty
             (parse_token_list st |> List.map (fun t -> Verbatim t))
         in
         ObjLike body
     in
-    H.replace st.macro_tab name def;
+    H.replace pp_state.macro_tab name def;
     lex st
   | UNDEF ->
     let name = expect_ident st in
-    H.remove st.macro_tab name;
+    H.remove pp_state.macro_tab name;
     lex st
   | Ident s
-    when not (List.mem s t.no_expand_list) && H.mem st.macro_tab s ->
+    when not (List.mem s t.no_expand_list) && H.mem pp_state.macro_tab s ->
     let expand arg_tab body =
       let l' =
         body |> List.map (subst_token s t.no_expand_list arg_tab) |> List.concat
@@ -273,11 +283,12 @@ let rec lex st =
       begin match l' with
         | [] -> ()
         | hd::tl ->
-          st.token_queue <- { hd with ws = t.ws } :: tl @ st.token_queue;
+          pp_state.token_queue <-
+            { hd with ws = t.ws } :: tl @ pp_state.token_queue
       end;
       lex st
     in
-    begin match H.find st.macro_tab s with
+    begin match H.find pp_state.macro_tab s with
       | ObjLike body -> expand [||] body
       | FunLike (arity, body) ->
         if match_token LParen st then
@@ -285,7 +296,8 @@ let rec lex st =
             let args = parse_macro_arg_list st in
             let n_arg = List.length args in
             if n_arg = arity then
-              args |> List.map (expand_token_list st.macro_tab) |> Array.of_list
+              args |> List.map (expand_token_list pp_state.macro_tab) |>
+              Array.of_list
             else if n_arg = 0 && arity = 1 then [|[]|]
             else error "wrong number of macro arguments"
           in
@@ -298,45 +310,47 @@ let rec lex st =
   | IFDEF ->
     begin match parse_token_list st with
       | [{ payload = Ident name; _ }] ->
-        st.cond_stack <- (H.mem st.macro_tab name, false) :: st.cond_stack
+        pp_state.cond_stack <-
+          (H.mem pp_state.macro_tab name, false) :: pp_state.cond_stack
       | _ -> error "syntax error in #ifdef"
     end;
     lex st
   | IFNDEF ->
     begin match parse_token_list st with
       | [{ payload = Ident name; _ }] ->
-        st.cond_stack <- (not (H.mem st.macro_tab name), false) :: st.cond_stack
+        pp_state.cond_stack <-
+          (not (H.mem pp_state.macro_tab name), false) :: pp_state.cond_stack
       | _ -> error "syntax error in #ifndef"
     end;
     lex st
   | ELSE ->
     skip_to_eol st;
-    begin match st.cond_stack with
+    begin match pp_state.cond_stack with
       | [] -> error "#else without #if"
       | (_, true) :: _ -> error "duplicate #else"
-      | (cond, false) :: tl -> st.cond_stack <- (not cond, true) :: tl
+      | (cond, false) :: tl -> pp_state.cond_stack <- (not cond, true) :: tl
     end;
     lex st
   | ENDIF ->
     skip_to_eol st;
-    begin match st.cond_stack with
+    begin match pp_state.cond_stack with
       | [] -> error "#endif without #if"
-      | _::tl -> st.cond_stack <- tl
+      | _::tl -> pp_state.cond_stack <- tl
     end;
     lex st
   | _ -> t
 
 and expand_token_list macro_tab l =
   (* Format.printf "expanding ‘%a’@." pp_token_list l; *)
-  let st = {
-    lexbuf = Lexing.from_string "";
+  let lexbuf = Lexing.from_string "" in
+  let pp_state = {
     lex_state = Lexer.init_state ();
     macro_tab;
     token_queue = l;
     cond_stack = []
   } in
   let rec loop acc =
-    let t = lex st in
+    let t = lex (pp_state, lexbuf) in
     if t.payload = EOF then acc else loop (t::acc)
   in
   loop [] |> List.rev
@@ -344,16 +358,35 @@ and expand_token_list macro_tab l =
   Format.printf "‘%a’ → ‘%a’@." pp_token_list l pp_token_list result;
   result *)
 
-let () =
+let make_lexer () =
+  let pp_state = init_state () in
+  fun lexbuf -> lex (pp_state, lexbuf)
+
+let make_supplier ic =
+  let lexbuf = Lexing.from_channel ic in
+  let pp_state = init_state () in
+  fun () ->
+    let token = lex (pp_state, lexbuf) in
+(*     Format.printf "%d: %a ‘%s’\n" token.pos pp_pptoken token.payload token.text; *)
+    let start_pos = lexbuf.lex_start_p in
+    let end_pos =
+      { start_pos with
+        pos_cnum = start_pos.pos_cnum + String.length token.text }
+    in
+    let token' = convert_token token.payload in
+    Format.printf "%d: %a ‘%s’\n"
+      token.pos pp_pptoken token.payload token.text;
+    token', start_pos, end_pos
+
+let main () =
   Printexc.record_backtrace true;
   let lexbuf = Lexing.from_channel stdin in
-  let st = init_state lexbuf in
+  let pp_state = init_state () in
   let rec loop () =
-    let t = lex st in
-    Printf.printf "%d: %s ‘%s’\n" t.pos (show_token t.payload) t.text;
+    let t = lex (pp_state, lexbuf) in
+    Printf.printf "%d: %s ‘%s’\n" t.pos (show_pptoken t.payload) t.text;
  (* if t.ws then print_char ' ';
     print_string t.text; *)
     if t.payload = EOF then () else loop ()
   in
-  loop ();
-  print_char '\n'
+  loop ()
