@@ -101,15 +101,15 @@ let oct_escape = '\\' octdigit octdigit? octdigit?
 let string_elem = [^ '"'] | "\\\""
 let string = '"' string_elem* '"'
 
-rule initial s = parse
+rule token s = parse
 | "/*"          { add_whitespace s lexbuf;
                   comment s lexbuf;
-                  initial s lexbuf }
+                  token s lexbuf }
 | "//"          { add_whitespace s lexbuf;
                   one_line_comment s lexbuf;
-                  initial s lexbuf }
+                  token s lexbuf }
 | blank         { add_whitespace s lexbuf;
-                  initial s lexbuf }
+                  token s lexbuf }
 | floatnum      { FloatLit }
 | hexnum        { IntLit }
 | octnum        { IntLit }
@@ -164,7 +164,7 @@ rule initial s = parse
 | ident         { Ident }
 | eof           { EOF }
 | "##"          { HashHash }
-| '#'           { if at_bol lexbuf then directive lexbuf else Hash }
+| '#'           { Hash }
 
 and comment s = parse
 | "*/"          { add_whitespace s lexbuf }
@@ -203,6 +203,13 @@ and string s = parse
 and directive = parse
 | [^'\n']* '\n' { next_line lexbuf; Directive }
 | [^'\n']* eof  { Directive }
+
+and include_file = parse
+| blank         { include_file lexbuf }
+| '"' [^ '"']* '"'
+                { UserInclude }
+| '<' [^ '<' '>']* '>'
+                { SysInclude }
 
 and skip_line = parse
 | '\n'          { next_line lexbuf }

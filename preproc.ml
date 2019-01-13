@@ -19,6 +19,14 @@ type token = {
   no_expand_list : string list;
 }
 
+let eof = {
+  kind = EOF;
+  text = "";
+  pos = Lexing.dummy_pos;
+  ws = "";
+  no_expand_list = []
+}
+
 type replace_token =
   | Verbatim of token
   | Param of int
@@ -33,12 +41,19 @@ type macro_def =
 
 type state = {
   lex_state : Lexer.state;
+  mutable lexbuf : Lexing.lexbuf;
   macro_tab : macro_def H.t;
-  mutable token_queue : token list;
-  mutable cond_stack : (bool * bool) list
+  token_stack : token Stack.t;
+  mutable cond_stack : (bool * bool) list;
+  sys_include_dirs : string list;
+  user_include_dirs : string list;
+  mutable input_chan : in_channel;
+  mutable include_stack : (Lexing.lexbuf * in_channel) list;
+  max_include_depth : int
 }
 
-let init_state () =
+let init_state input_chan =
+  let lexbuf = Lexing.from_channel input_chan in
   let macro_tab =
     [
       "__FILE__", ObjLike [Magic_FILE];
@@ -46,9 +61,15 @@ let init_state () =
     ] |> List.to_seq |> H.of_seq
   in
   { lex_state = Lexer.init_state ();
+    lexbuf;
+    include_stack = [];
     macro_tab;
-    token_queue = [];
-    cond_stack = [] }
+    token_stack = Stack.create ();
+    cond_stack = [];
+    sys_include_dirs = ["/usr/local/include/"; "/usr/include/"];
+    user_include_dirs = [""];
+    input_chan;
+    max_include_depth = 16 }
 
 let wrap_token kind lex_state lexbuf =
   let text = Lexing.lexeme lexbuf in
@@ -60,62 +81,55 @@ let wrap_token kind lex_state lexbuf =
 let before x f = f x; x
 
 let lex_raw lex_state lexbuf =
-  let kind = Lexer.initial lex_state lexbuf in
+  let kind = Lexer.token lex_state lexbuf in
   wrap_token kind lex_state lexbuf
 (*before (wrap_token kind lex_state lexbuf)
     (fun { kind; pos; ws; text; _ } ->
        Printf.eprintf "[lex_raw] %d:%d: ‘%s’ ‘%s’\n"
          pos.pos_lnum (pos.pos_cnum - pos.pos_bol) ws text)*)
 
-let peek (pp_state, lexbuf) =
-  let t =
-    match pp_state.token_queue with
-    | [] ->
-      let t = lex_raw pp_state.lex_state lexbuf in
-      pp_state.token_queue <- [t]; t
-    | t::_ -> t
-  in t.kind
-
-let skip (pp_state, _) =
-  pp_state.token_queue <- List.tl pp_state.token_queue
-
-let get (pp_state, lexbuf) =
-  match pp_state.token_queue with
-  | [] -> lex_raw pp_state.lex_state lexbuf
-  | hd::tl -> pp_state.token_queue <- tl; hd
-
 exception Error of string
 
 let error s = raise (Error s)
 
-let parse_macro_arg st =
-  let rec loop depth acc =
-    match peek st with
-    | Comma -> if depth = 0 then acc else loop depth (get st :: acc)
-    | LParen -> loop (depth+1) (get st :: acc)
-    | RParen -> if depth = 0 then acc else loop (depth-1) (get st :: acc)
-    | EOF -> error "unterminated macro argument"
-    | _ -> loop depth (get st :: acc)
-  in
-  loop 0 [] |> List.rev
+let pp_token_list f l =
+  let open Format in
+  l |> List.iter begin fun t ->
+    pp_print_string f t.ws;
+    pp_print_string f t.text
+  end
 
-let parse_macro_arg_list st =
-  match peek st with
-  | RParen -> skip st; []
+let parse_macro_arg getsym lookahead =
+  let rec loop depth acc t =
+    match t.kind with
+    | Comma when depth = 0 -> acc, t
+    | LParen -> loop (depth+1) (t :: acc) (getsym ())
+    | RParen ->
+      if depth = 0 then acc, t else
+        loop (depth-1) (t :: acc) (getsym ())
+    | EOF -> error "unterminated macro argument"
+    | _ -> loop depth (t :: acc) (getsym ())
+  in
+  let l, lookahead' = loop 0 [] lookahead in
+  List.rev l, lookahead'
+
+let parse_macro_arg_list getsym lookahead =
+  match lookahead.kind with
+  | RParen -> []
   | _ ->
-    let rec loop acc =
-      let acc' = parse_macro_arg st :: acc in
-      match peek st with
-      | RParen -> skip st; acc'
-      | Comma -> skip st; loop acc'
+    let rec loop lookahead =
+      let arg, lookahead' = parse_macro_arg getsym lookahead in
+      match lookahead'.kind with
+      | RParen -> [arg]
+      | Comma -> arg :: loop (getsym ())
       | _ -> error "macro argument list"
     in
-    loop [] |> List.rev
+    loop lookahead
 
 let parse_token s =
   let lexbuf = Lexing.from_string s in
   let lex_state = Lexer.init_state () in
-  let t = Lexer.initial lex_state lexbuf in
+  let t = Lexer.token lex_state lexbuf in
   if lexbuf.lex_curr_pos < String.length s then
     error (Printf.sprintf "not a valid token: ‘%s’" s);
   t
@@ -172,13 +186,6 @@ let rec parse_macro_body param_map = function
   | hd :: tl -> hd :: parse_macro_body param_map tl
   | [] -> []
 
-let pp_token_list f l =
-  let open Format in
-  l |> List.iter begin fun t ->
-    pp_print_string f t.ws;
-    pp_print_string f t.text
-  end
-
 let rec subst_token (macro_name, noexp, pos, ws as token_info) arg_tab = function
   | Verbatim u -> [{ u with no_expand_list = macro_name :: noexp; pos }]
   | Param i ->
@@ -210,7 +217,33 @@ let directive_type dir =
   let t = lex_raw lex_state lexbuf in
   t.text
 
-let handle_directive pp_state pos dir =
+let rec find_include_file search_path filename =
+  match search_path with
+  | [] -> None
+  | hd :: tl ->
+    let path = hd ^ filename in
+    if Sys.file_exists path then Some path else
+      find_include_file tl filename
+
+let push_include st path =
+  if List.length st.include_stack >= st.max_include_depth then
+    error "too many nested #include's";
+  let ic = open_in path in
+  st.include_stack <- (st.lexbuf, st.input_chan) :: st.include_stack;
+  let lexbuf = Lexing.from_channel ic in
+  st.lexbuf <- lexbuf;
+  st.input_chan <- ic
+
+let pop_include st =
+  close_in st.input_chan;
+  match st.include_stack with
+  | [] -> failwith "pop_include"
+  | (lb, ic) :: tl ->
+    st.include_stack <- tl;
+    st.lexbuf <- lb;
+    st.input_chan <- ic
+
+let handle_directive st pos dir =
   let lex_state = Lexer.init_state () in
   let lexbuf = Lexing.from_string dir in
   lexbuf.lex_abs_pos <- pos.Lexing.pos_cnum;
@@ -266,88 +299,85 @@ let handle_directive pp_state pos dir =
           in
           ObjLike body
       in
-      H.replace pp_state.macro_tab name def
+      H.replace st.macro_tab name def
     | "undef" ->
       let name = expect_ident () in
-      H.remove pp_state.macro_tab name
+      H.remove st.macro_tab name
     | "ifdef" ->
       begin match parse_token_list () with
         | [{ kind = Ident; text = name; _ }] ->
-          pp_state.cond_stack <-
-            (H.mem pp_state.macro_tab name, false) :: pp_state.cond_stack
+          st.cond_stack <-
+            (H.mem st.macro_tab name, false) :: st.cond_stack
         | _ -> error "syntax error in #ifdef"
       end
     | "ifndef" ->
       begin match parse_token_list () with
         | [{ kind = Ident; text = name; _ }] ->
-          pp_state.cond_stack <-
-            (not (H.mem pp_state.macro_tab name), false) :: pp_state.cond_stack
+          st.cond_stack <-
+            (not (H.mem st.macro_tab name), false) :: st.cond_stack
         | _ -> error "syntax error in #ifndef"
       end
     | "else" ->
-      begin match pp_state.cond_stack with
+      begin match st.cond_stack with
         | [] -> error "#else without #if"
         | (_, true) :: _ -> error "duplicate #else"
-        | (cond, false) :: tl -> pp_state.cond_stack <- (not cond, true) :: tl
+        | (cond, false) :: tl -> st.cond_stack <- (not cond, true) :: tl
       end
     | "endif" ->
-      begin match pp_state.cond_stack with
+      begin match st.cond_stack with
         | [] -> error "#endif without #if"
-        | _::tl -> pp_state.cond_stack <- tl
+        | _::tl -> st.cond_stack <- tl
+      end
+    | "include" ->
+      let get_filename lexbuf =
+        let s = Lexing.lexeme lexbuf in
+        String.sub s 1 (String.length s - 2)
+      in
+      begin match Lexer.include_file lexbuf with
+        | SysInclude ->
+          let filename = get_filename lexbuf in
+          begin match find_include_file st.sys_include_dirs filename with
+            | Some path ->
+              push_include st path
+            | None -> ()
+          end
+        | UserInclude ->
+          let filename = get_filename lexbuf in
+          begin match find_include_file st.user_include_dirs filename with
+            | Some path ->
+              push_include st path
+            | None -> ()
+          end
       end
     | _ -> error "invalid directive"
   else error "invalid directive"
 
-let rec lex (pp_state, lexbuf as st) =
-  let t =
-    match pp_state.token_queue with
-    | [] ->
-      begin match pp_state.cond_stack with
-        | [] | (true, _) :: _ ->
-          lex_raw pp_state.lex_state lexbuf
-        | (false, false) :: _ ->
-          let rec loop () =
-            match Lexer.skip_to_directive lexbuf with
-            | Directive ->
-              begin match Lexing.lexeme lexbuf with
-                | "else" | "endif" -> ()
-                | _ -> loop ()
-              end
-            | EOF -> ()
-            | _ -> assert false
-          in
-          loop ();
-          lex_raw pp_state.lex_state lexbuf
-        | (false, true) :: _ ->
-          let rec loop () =
-            match Lexer.skip_to_directive lexbuf with
-            | Directive ->
-              begin match Lexing.lexeme lexbuf with
-                | "endif" -> ()
-                | _ -> loop ()
-              end
-            | EOF -> ()
-            | _ -> assert false
-          in
-          loop ();
-          lex_raw pp_state.lex_state lexbuf
-      end
-    | hd :: tl ->
-      let () = pp_state.token_queue <- tl in hd
-  in
+let at_bol p =
+  Lexing.(p.pos_cnum = p.pos_bol)
+
+let rec push_token_list s = function
+  | [] -> ()
+  | hd :: tl ->
+    push_token_list s tl; Stack.push hd s
+
+let subject_to_expansion macro_tab peek t =
+  not (List.mem t.text t.no_expand_list) &&
+  match H.find macro_tab t.text with
+  | ObjLike _ -> true
+  | FunLike _ -> (peek ()).kind = LParen
+  | exception Not_found -> false
+
+let rec lex_simple macro_tab token_stack =
+  let t = Stack.pop token_stack in
   match t.kind with
-  | Directive ->
-    handle_directive pp_state t.pos t.text;
-    Buffer.add_string pp_state.lex_state.Lexer.whitespace t.ws;
-    lex st
-  | Ident when
-      not (List.mem t.text t.no_expand_list) &&
-      H.mem pp_state.macro_tab t.text ->
-    pp_state.token_queue <- expand_ident st t;
-    lex st
+  | Ident when subject_to_expansion macro_tab
+        (fun () -> Stack.top token_stack) t ->
+    push_token_list token_stack
+      (expand_ident macro_tab (fun () -> Stack.pop token_stack) t);
+    lex_simple macro_tab token_stack
   | _ -> t
 
-and expand_ident (pp_state, lexbuf as st) t =
+and expand_ident macro_tab getsym t : token list =
   let s = t.text in
   let expand arg_tab body =
     let l' =
@@ -358,54 +388,113 @@ and expand_ident (pp_state, lexbuf as st) t =
       | hd::tl -> { hd with ws = t.ws } :: tl
     end
   in
-  begin match H.find pp_state.macro_tab s with
+  begin match H.find macro_tab s with
     | ObjLike body -> expand [||] body
     | FunLike (arity, body) ->
-      let next_token = lex_raw pp_state.lex_state lexbuf in
-      if next_token.kind = LParen then
-        let arg_tab =
-          let args = parse_macro_arg_list st in
-          let n_arg = List.length args in
-          if n_arg = arity then
-            args |> List.map (expand_token_list pp_state.macro_tab) |>
-            Array.of_list
-          else if n_arg = 0 && arity = 1 then [|[]|]
-          else error "wrong number of macro arguments"
-        in
-        (* arg_tab |> Array.iteri begin fun i l ->
-           Format.printf "[%d]=‘%a’@." i pp_token_list l
-           end; *)
-        expand arg_tab body
-      else [t; next_token]
+      let next_token = getsym () in
+      assert (next_token.kind = LParen);
+      let arg_tab =
+        let args = parse_macro_arg_list getsym (getsym ()) in
+        let n_arg = List.length args in
+        if n_arg = arity then
+          args |> List.map (expand_token_list macro_tab) |>
+          Array.of_list
+        else if n_arg = 0 && arity = 1 then [|[]|]
+        else error "wrong number of macro arguments"
+      in
+      (* arg_tab |> Array.iteri begin fun i l ->
+        Format.printf "[%d]=‘%a’@." i pp_token_list l
+      end; *)
+      expand arg_tab body
   end
 
 and expand_token_list macro_tab l =
   (* Format.printf "expanding ‘%a’@." pp_token_list l; *)
-  let lexbuf = Lexing.from_string "" in
-  let pp_state = {
-    lex_state = Lexer.init_state ();
-    macro_tab;
-    token_queue = l;
-    cond_stack = []
-  } in
+  let s = Stack.create () in
+  Stack.push eof s;
+  push_token_list s l;
   let rec loop acc =
-    let t = lex (pp_state, lexbuf) in
-    if t.kind = EOF then acc else loop (t::acc)
+    match lex_simple macro_tab s with
+    | { kind = EOF; _ } -> acc
+    | t -> loop (t::acc)
   in
   loop [] |> List.rev
   (* |> fun result ->
   Format.printf "‘%a’ → ‘%a’@." pp_token_list l pp_token_list result;
   result *)
 
-let make_lexer () =
-  let pp_state = init_state () in
-  fun lexbuf -> lex (pp_state, lexbuf)
+let lex_raw' st =
+  if Stack.is_empty st.token_stack then
+    lex_raw st.lex_state st.lexbuf
+  else Stack.pop st.token_stack
+
+let peek st =
+  if Stack.is_empty st.token_stack then
+    let t = lex_raw st.lex_state st.lexbuf in
+    let () = Stack.push t st.token_stack in
+    t
+  else Stack.top st.token_stack
+
+let rec lex st =
+  let t =
+    if Stack.is_empty st.token_stack then begin
+      begin match st.cond_stack with
+        | [] | (true, _) :: _ ->
+          lex_raw st.lex_state st.lexbuf
+        | (false, false) :: _ ->
+          let rec loop () =
+            match Lexer.skip_to_directive st.lexbuf with
+            | Directive ->
+              begin match Lexing.lexeme st.lexbuf with
+                | "else" | "endif" -> ()
+                | _ -> loop ()
+              end
+            | EOF -> ()
+            | _ -> assert false
+          in
+          loop ();
+          lex_raw st.lex_state st.lexbuf
+        | (false, true) :: _ ->
+          let rec loop () =
+            match Lexer.skip_to_directive st.lexbuf with
+            | Directive ->
+              begin match Lexing.lexeme st.lexbuf with
+                | "endif" -> ()
+                | _ -> loop ()
+              end
+            | EOF -> ()
+            | _ -> assert false
+          in
+          loop ();
+          lex_raw st.lex_state st.lexbuf
+      end
+    end else Stack.pop st.token_stack
+  in
+  match t.kind with
+  | Hash ->
+    if at_bol t.pos then begin
+      let dir_pos = st.lexbuf.lex_curr_p in
+      let _ = Lexer.directive st.lexbuf in
+      let dir = Lexing.lexeme st.lexbuf in
+      handle_directive st dir_pos dir;
+      Buffer.add_string st.lex_state.Lexer.whitespace t.ws;
+      lex st
+    end else t
+  | Ident when subject_to_expansion st.macro_tab (fun () -> peek st) t ->
+    push_token_list st.token_stack
+      (expand_ident st.macro_tab (fun () -> lex_raw' st) t);
+    lex st
+  | EOF ->
+    if st.include_stack = [] then t else
+      let () = pop_include st in
+      let t' = lex st in
+      { t' with ws = t.ws ^ t'.ws }
+  | _ -> t
 
 let make_supplier ic =
-  let lexbuf = Lexing.from_channel ic in
-  let pp_state = init_state () in
+  let st = init_state ic in
   fun () ->
-    let token = lex (pp_state, lexbuf) in
+    let token = lex st in
 (*     Format.printf "%d: %a ‘%s’\n" token.pos pp_pptoken token.kind token.text; *)
     let start_pos = token.pos in
     let end_pos =
@@ -420,10 +509,9 @@ let make_supplier ic =
     token', start_pos, end_pos
 
 let main () =
-  let lexbuf = Lexing.from_channel stdin in
-  let pp_state = init_state () in
+  let st = init_state stdin in
   let rec loop () =
-    let t = lex (pp_state, lexbuf) in
+    let t = lex st in
     print_string t.ws;
     print_string t.text;
     if t.kind = EOF then () else loop ()

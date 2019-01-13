@@ -64,3 +64,5 @@ type pptoken =
   | UNDEF*)
 
 [@@deriving show { with_path = false }]
+
+type include_file = SysInclude | UserInclude
