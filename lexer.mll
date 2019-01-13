@@ -3,11 +3,11 @@ open Lexing
 open PP_Token
 
 let next_line lexbuf =
-  let pos = lexbuf.lex_curr_p in
+  let p = lexbuf.lex_curr_p in
   lexbuf.lex_curr_p <-
-    { pos with
+    { p with
       pos_bol = lexbuf.lex_curr_pos;
-      pos_lnum = pos.pos_lnum + 1 }
+      pos_lnum = p.pos_lnum + 1 }
 
 let at_bol lexbuf =
   (* Format.printf "lex_start_pos=%d pos_bol=%d@."
@@ -15,25 +15,45 @@ let at_bol lexbuf =
   lexbuf.lex_start_pos = lexbuf.lex_curr_p.pos_bol
 
 type state = {
-  mutable in_directive : bool;
-  mutable has_whitespace : bool;
+  whitespace : Buffer.t
 }
 
 let init_state () =
-  { in_directive = false;
-    has_whitespace = false }
+  { whitespace = Buffer.create 64 }
 
 module M = Map.Make(String)
 
-let directive_map = [
-  "define", DEFINE;
-  "else", ELSE;
-  "endif", ENDIF;
-  "ifdef", IFDEF;
-  "ifndef", IFNDEF;
-  "include", INCLUDE;
-  "undef", UNDEF;
-] |> List.to_seq |> M.of_seq
+type pos = {
+  mutable lnum : int;
+  mutable bol : int;
+  mutable cnum : int
+}
+
+let add_whitespace s lexbuf =
+  let ws = lexeme lexbuf in
+  Buffer.add_string s.whitespace ws;
+  let pos =
+    let p = lexbuf.lex_start_p in
+    {
+      lnum = p.pos_lnum;
+      bol  = p.pos_bol;
+      cnum = p.pos_cnum
+    }
+  in
+  let it = function
+    | '\n' ->
+      pos.lnum <- pos.lnum + 1;
+      pos.cnum <- pos.cnum + 1;
+      pos.bol <- pos.cnum
+    | _ ->
+      pos.cnum <- pos.cnum + 1
+  in
+  String.iter it ws;
+  lexbuf.lex_curr_p <-
+    { lexbuf.lex_curr_p with
+      pos_lnum = pos.lnum;
+      pos_bol = pos.bol;
+      pos_cnum = pos.cnum }
 
 }
 
@@ -72,25 +92,29 @@ let floatsuffix = ['f' 'F' 'l' 'L']
 let floatnum = (decfloat | hexfloat) floatsuffix?
 
 let ident = (letter|'_'|'$')(letter|decdigit|'_'|'$')*
-let blank = [' ' '\t' '\012' '\r']+
+let blank = [' ' '\t' '\012' '\r' '\n']+
 
 let escape = '\\' _
 let hex_escape = '\\' ['x' 'X'] hexdigit+
 let oct_escape = '\\' octdigit octdigit? octdigit?
 
+let string_elem = [^ '"'] | "\\\""
+let string = '"' string_elem* '"'
+
 rule initial s = parse
-| "/*"          { comment lexbuf; initial s lexbuf }
-| "//"          { one_line_comment lexbuf; initial s lexbuf }
-| blank         { s.has_whitespace <- true; initial s lexbuf }
-| '\n'          { next_line lexbuf;
-                  s.has_whitespace <- true;
-                  if s.in_directive then
-                    (s.in_directive <- false; EOL)
-                  else initial s lexbuf }
-| floatnum      { FloatLit (Lexing.lexeme lexbuf) }
-| hexnum        { IntLit (Lexing.lexeme lexbuf) }
-| octnum        { IntLit (Lexing.lexeme lexbuf) }
-| intnum        { IntLit (Lexing.lexeme lexbuf) }
+| "/*"          { add_whitespace s lexbuf;
+                  comment s lexbuf;
+                  initial s lexbuf }
+| "//"          { add_whitespace s lexbuf;
+                  one_line_comment s lexbuf;
+                  initial s lexbuf }
+| blank         { add_whitespace s lexbuf;
+                  initial s lexbuf }
+| floatnum      { FloatLit }
+| hexnum        { IntLit }
+| octnum        { IntLit }
+| intnum        { IntLit }
+| string        { StringLit }
 | "..."         { Ellipsis }
 | "+="          { PlusEq }
 | "-="          { MinusEq }
@@ -137,55 +161,56 @@ rule initial s = parse
 | ';'           { Semi }
 | ','           { Comma }
 | '.'           { Dot }
-| ident         { Ident (Lexing.lexeme lexbuf) }
+| ident         { Ident }
 | eof           { EOF }
 | "##"          { HashHash }
-| '#'           { if at_bol lexbuf then
-                    (s.in_directive <- true; directive lexbuf)
-                  else Hash }
+| '#'           { if at_bol lexbuf then directive lexbuf else Hash }
 
-and comment = parse
-| "*/"          { () }
-| _             { comment lexbuf }
-
-and one_line_comment = parse
-| '\n'          { next_line lexbuf }
+and comment s = parse
+| "*/"          { add_whitespace s lexbuf }
 | eof           { () }
-| _             { one_line_comment lexbuf }
+| ( [^'*'] | '*' [^'/'] )+
+                { add_whitespace s lexbuf; comment s lexbuf }
+| _             { add_whitespace s lexbuf; comment s lexbuf }
+
+and one_line_comment s = parse
+| '\n'          { add_whitespace s lexbuf }
+| eof           { () }
+| [^'\n']+      { add_whitespace s lexbuf; one_line_comment s lexbuf }
+
+(*
+and escape_seq = parse
+| 'n'           { '\n' }
+| 'r'           { '\r' }
+| 't'           { '\t' }
+| 'b'           { '\b' }
+| 'f'           { '\012' }
+| 'v'           { '\011' }
+| 'a'           { '\007' }
+| ['0'-'7']+    { Char.chr (int_of_string ("0o" ^ lexeme lexbuf)) }
+
+and string s = parse
+| '"'           { let value = Buffer.contents s.string_contents in
+                  Buffer.clear s.string_contents }
+| '\\'          { Buffer.add_char s.string_contents (escape_seq lexbuf);
+                  string s lexbuf }
+| _             { Buffer.add_string s.string_contents (lexeme lexbuf);
+                  string s lexbuf }
+| eof           { let value = Buffer.contents s.string_contents in
+                  Buffer.clear s.string_contents }
+*)
 
 and directive = parse
-| blank         { directive lexbuf }
-| ident as s    { M.find s directive_map }
-
-and dir_else_endif = parse
-| blank         { dir_else_endif lexbuf }
-| ident as s    { match s with
-                  | "else" -> Some ELSE
-                  | "endif" -> Some ENDIF
-                  | _ -> None }
-
-and dir_endif = parse
-| blank         { dir_endif lexbuf }
-| ident as s    { match s with
-                  | "endif" -> Some ENDIF
-                  | _ -> None }
+| [^'\n']* '\n' { next_line lexbuf; Directive }
+| [^'\n']* eof  { Directive }
 
 and skip_line = parse
 | '\n'          { next_line lexbuf }
-| _             { skip_line lexbuf }
+| [^'\n']+      { skip_line lexbuf }
 | eof           { () }
 
-(* invoke rules below only at beginning of line *)
-and skip_to_else_endif s = parse
-| '#'           { match dir_else_endif lexbuf with
-                  | Some t -> s.in_directive <- true; t
-                  | None -> skip_line lexbuf; skip_to_else_endif s lexbuf }
-| _             { skip_line lexbuf; skip_to_else_endif s lexbuf }
-| eof           { EOF }
-
-and skip_to_endif s = parse
-| '#'           { match dir_endif lexbuf with
-                  | Some t -> s.in_directive <- true; t
-                  | None -> skip_line lexbuf; skip_to_endif s lexbuf }
-| _             { skip_line lexbuf; skip_to_endif s lexbuf }
+(* invoke only at beginning of line *)
+and skip_to_directive = parse
+| '#'           { directive lexbuf }
+| _             { skip_line lexbuf; skip_to_directive lexbuf }
 | eof           { EOF }

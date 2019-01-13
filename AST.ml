@@ -3,7 +3,7 @@ type lit =
   | FloatLit of string
   | CharLit of string
   | StringLit of string
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type unary_op =
   | Dot of string
@@ -19,7 +19,7 @@ type unary_op =
   | Not
   | LogNot
   | SizeOf
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type binary_op =
   | Index
@@ -53,7 +53,7 @@ type binary_op =
   | XorAssign
   | OrAssign
   | Seq
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type type_spec =
   | Void
@@ -66,26 +66,26 @@ type type_spec =
   | Double
   | Signed
   | Unsigned
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
-type type_qual = Const | Volatile [@@deriving show]
+type type_qual = Const | Volatile [@@deriving show { with_path = false }]
 
 type type_spec_qual =
   | TypeSpec of type_spec
   | TypeQual of type_qual
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type sc_spec =
   | Typedef
   | Extern
   | Static
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type decl_spec =
   | DeclStorageClass of sc_spec
   | DeclTypeSpec of type_spec
   | DeclTypeQual of type_qual
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type expr =
   | IdentExpr of string
@@ -116,13 +116,13 @@ and parameter_decl =
 
 and typ = type_spec_qual list * abstract_declarator
 
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type init_declarator = declarator * expr option
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type decl = decl_spec list * init_declarator list
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type stmt =
   | NullStmt
@@ -146,12 +146,12 @@ and block_item =
   | DeclItem of decl
   | StmtItem of stmt
 
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type func_def = decl_spec list * declarator * decl list * block_item list
-[@@deriving show]
+[@@deriving show { with_path = false }]
 
 type extern_decl =
   | FuncDef of func_def
   | Decl of decl
-[@@deriving show]
+[@@deriving show { with_path = false }]

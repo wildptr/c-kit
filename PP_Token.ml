@@ -1,10 +1,10 @@
 type pptoken =
   | EOF
-  | Ident of string
-  | IntLit of string
-  | FloatLit of string
-  | CharLit of string
-  | StringLit of string
+  | Ident
+  | IntLit
+  | FloatLit
+  | CharLit
+  | StringLit
   | Ellipsis
   | PlusEq
   | MinusEq
@@ -53,32 +53,14 @@ type pptoken =
   | Dot
   | Hash
   | HashHash
-  | EOL
+  | Directive
 
-  | DEFINE
+(*| DEFINE
   | ELSE
   | ENDIF
   | IFDEF
   | IFNDEF
   | INCLUDE
-  | UNDEF
+  | UNDEF*)
 
-(*| BOOL
-  | CHAR
-  | CONST
-  | DOUBLE
-  | ELSE
-  | EXTERN
-  | FLOAT
-  | INT
-  | LONG
-  | SHORT
-  | SIGNED
-  | SIZEOF
-  | STATIC
-  | TYPEDEF
-  | UNSIGNED
-  | VOID
-  | VOLATILE*)
-
-[@@deriving show]
+[@@deriving show { with_path = false }]

@@ -33,22 +33,23 @@ let keyword_map = [
   "while"       , P.WHILE ;
 ] |> List.to_seq |> M.of_seq
 
-let convert_token = function
+let convert_token kind text =
+  match kind with
   | EOF ->
     P.EOF
-  | Ident s ->
-    begin match M.find s keyword_map with
+  | Ident ->
+    begin match M.find text keyword_map with
       | kw -> kw
-      | exception Not_found -> P.Ident s
+      | exception Not_found -> P.Ident text
     end
-  | IntLit s ->
-    P.IntLit s
-  | FloatLit s ->
-    P.FloatLit s
-  | CharLit s ->
-    P.CharLit s
-  | StringLit s ->
-    P.StringLit s
+  | IntLit ->
+    P.IntLit text
+  | FloatLit ->
+    P.FloatLit text
+  | CharLit ->
+    P.CharLit text
+  | StringLit ->
+    P.StringLit text
   | Ellipsis ->
     P.Ellipsis
   | PlusEq ->
@@ -144,13 +145,7 @@ let convert_token = function
   | Hash ->
     P.Hash
 
-  | EOL
-  | HashHash
-  | DEFINE
-  | ELSE
-  | ENDIF
-  | IFDEF
-  | IFNDEF
-  | INCLUDE
-  | UNDEF ->
+  (* these tokens are exclusive to the preprocessor *)
+  | Directive
+  | HashHash ->
     failwith "convert_token"
