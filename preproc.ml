@@ -81,17 +81,20 @@ let wrap_token_no_ws kind lexbuf =
 let at_bol p =
   Lexing.(p.pos_cnum = p.pos_bol)
 
+let flush_buffer b =
+  let s = Buffer.contents b in
+  Buffer.clear b;
+  s
+
 let lex ws_buf lexbuf =
   let kind = Lexer.token ws_buf lexbuf in
   let text = Lexing.lexeme lexbuf in
   let pos = lexbuf.lex_start_p in
   let ws =
-    if kind = Hash && at_bol pos then "" else
-      let s = Buffer.contents ws_buf in
-      let () = Buffer.clear ws_buf in
-      s
+    if kind = Hash && at_bol pos || kind = EOF then "" else
+      flush_buffer ws_buf
   in
-  Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text;
+(*   Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text; *)
   { kind; text; pos; ws }
 
 exception Error of Lexing.position * string
@@ -329,12 +332,12 @@ let parse_char s =
   Char.code c
 
 let parse_atom p =
-  match p.tok with
+  match getsym p with
   | { kind = IntLit; text; _ } ->
     parse_int text
   | { kind = CharLit; text; _ } ->
     parse_char text
-  | _ -> error p.tok.pos "invalid token"
+  | { pos; _ } -> error pos "invalid token"
 
 let is_prefix_op = function
   | Minus | Tilde | Bang -> true
@@ -386,7 +389,7 @@ let parse_binary_expr parse_sub_expr op_test p =
       let op = p.tok in
       skip p;
       let v2 = parse_sub_expr p in
-      eval_binary_op op v1 v2
+      loop (eval_binary_op op v1 v2)
     end else v1
   in
   loop v1
@@ -426,6 +429,11 @@ let rec parse_cond_expr p =
     let v3 = parse_cond_expr p in
     if v1 <> 0 then v2 else v3
   end else v1
+
+let parse_cond p =
+  let v = parse_cond_expr p in
+  expect p "";
+  v
 
 let rec unget_token_list p = function
   | [] -> ()
@@ -533,28 +541,25 @@ and expand_token_list macro_tab tok_list =
    Format.printf "‘%a’ → ‘%a’@." pp_token_list tok_list pp_token_list result;
    result *)
 
-let rec expand_cond macro_tab p q =
-  match getsym_expand macro_tab p with
-  | { text = "defined"; _ } as t ->
-    let name =
-      match getsym p with
-      | { kind = LParen; _ } ->
-        let name = expect_ident p in
-        let () = expect p ")" in
-        name
-      | { kind = Ident _; text; _ } -> text
-      | { pos; _ } -> error pos "syntax error"
-    in
-    let text = if H.mem macro_tab name then "1" else "0" in
-    Queue.push { t with kind = IntLit; text } q;
-    expand_cond macro_tab p q
-  | { kind = Ident _ } as t ->
-    Queue.push { t with kind = IntLit; text = "0" } q;
-    expand_cond macro_tab p q
-  | { kind = EOF; _ } -> ()
-  | t ->
-    Queue.push t q;
-    expand_cond macro_tab p q
+let make_cond_expander macro_tab p =
+  make_parser begin fun () ->
+    match getsym_expand macro_tab p with
+    | { text = "defined"; _ } as t ->
+      let name =
+        match getsym p with
+        | { kind = LParen; _ } ->
+          let name = expect_ident p in
+          let () = expect p ")" in
+          name
+        | { kind = Ident _; text; _ } -> text
+        | { pos; _ } -> error pos "syntax error"
+      in
+      let text = if H.mem macro_tab name then "1" else "0" in
+      { t with kind = IntLit; text }
+    | { kind = Ident _ } as t ->
+      { t with kind = IntLit; text = "0" }
+    | t -> t
+  end
 
 let handle_else st p =
   let pos = p.tok.pos in
@@ -583,9 +588,7 @@ let handle_elif st p =
   | (true, After) :: tl -> st.cond_stack <- (false, After) :: tl
   | (false, After) :: _ -> ()
   | (_, Before) :: tl ->
-    let q = Queue.create () in
-    expand_cond st.macro_tab p q;
-    let active = parse_cond_expr (make_parser (fun () -> Queue.pop q)) <> 0 in
+    let active = parse_cond (make_cond_expander st.macro_tab p) <> 0 in
     st.cond_stack <- (active, if active then After else Before) :: tl
 
 let handle_directive st (pos : Lexing.position) dir =
@@ -680,9 +683,7 @@ let handle_directive st (pos : Lexing.position) dir =
         end
       | "if" ->
         skip p;
-        let q = Queue.create () in
-        expand_cond st.macro_tab p q;
-        let active = parse_cond_expr (make_parser (fun () -> Queue.pop q)) <> 0 in
+        let active = parse_cond (make_cond_expander st.macro_tab p) <> 0 in
         st.cond_stack <- (active, if active then After else Before) :: st.cond_stack
       | "warning" -> () (* TODO *)
       | "error" -> () (* TODO *)
@@ -730,10 +731,9 @@ let make_preproc_parser st =
       end;
       next ()
     | EOF ->
-      if st.include_stack = [] then t else
-        let () = pop_include st in
-        let t' = next () in
-        { t' with ws = t.ws ^ t'.ws }
+      if st.include_stack = [] then
+        { t with ws = flush_buffer st.ws_buf }
+      else next ()
     | _ -> t
   in
   make_parser next
