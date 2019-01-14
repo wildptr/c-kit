@@ -1,6 +1,6 @@
 type pptoken =
   | EOF
-  | Ident
+  | Ident of string list (* no_expand_list *)
   | IntLit
   | FloatLit
   | CharLit

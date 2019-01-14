@@ -15,16 +15,7 @@ type token = {
   kind : pptoken;
   text : string;
   pos : Lexing.position;
-  ws : string; (* preceding whitespace *)
-  no_expand_list : string list;
-}
-
-let eof = {
-  kind = EOF;
-  text = "";
-  pos = Lexing.dummy_pos;
-  ws = "";
-  no_expand_list = []
+  ws : string (* preceding whitespace *)
 }
 
 type replace_token =
@@ -45,10 +36,9 @@ type cond_state =
   | Else        (* after #else *)
 
 type state = {
-  lex_state : Lexer.state;
+  ws_buf : Buffer.t;
   mutable lexbuf : Lexing.lexbuf;
   macro_tab : macro_def H.t;
-  token_stack : token Stack.t;
   (* fst indicates whether in active branch *)
   mutable cond_stack : (bool * cond_state) list;
   sys_include_dirs : string list;
@@ -66,11 +56,10 @@ let init_state input_chan =
       "__LINE__", ObjLike [Magic_LINE]
     ] |> List.to_seq |> H.of_seq
   in
-  { lex_state = Lexer.init_state ();
+  { ws_buf = Buffer.create 1024;
     lexbuf;
     include_stack = [];
     macro_tab;
-    token_stack = Stack.create ();
     cond_stack = [];
     sys_include_dirs = ["/usr/local/include/"; "/usr/include/"];
     user_include_dirs = [""];
@@ -81,22 +70,19 @@ let pp_pos f p =
   let open Lexing in
   Format.fprintf f "%s:%d:%d" p.pos_fname p.pos_lnum (p.pos_cnum - p.pos_bol)
 
-let wrap_token kind lex_state lexbuf =
-  let text = Lexing.lexeme lexbuf in
-  let pos = lexbuf.lex_start_p in
-  let ws = Buffer.contents lex_state.Lexer.whitespace in
-  Buffer.clear lex_state.Lexer.whitespace;
-  (*   Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text; *)
-  { kind; text; pos; ws; no_expand_list = [] }
-
 let wrap_token_no_ws kind lexbuf =
   let text = Lexing.lexeme lexbuf in
   let pos = lexbuf.lex_start_p in
-  { kind; text; pos; ws = ""; no_expand_list = [] }
+  { kind; text; pos; ws = "" }
 
-let lex_raw lex_state lexbuf =
-  let kind = Lexer.token lex_state lexbuf in
-  wrap_token kind lex_state lexbuf
+let lex ws_buf lexbuf =
+  let kind = Lexer.token ws_buf lexbuf in
+  let text = Lexing.lexeme lexbuf in
+  let pos = lexbuf.lex_start_p in
+  let ws = Buffer.contents ws_buf in
+  Buffer.clear ws_buf;
+  (*   Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text; *)
+  { kind; text; pos; ws }
 
 exception Error of Lexing.position * string
 
@@ -109,38 +95,64 @@ let pp_token_list f l =
     pp_print_string f t.text
   end
 
-let parse_macro_arg next lookahead =
-  let rec loop depth acc t =
-    match t.kind with
-    | Comma when depth = 0 -> acc, t
-    | LParen -> loop (depth+1) (t :: acc) (next ())
-    | RParen ->
-      if depth = 0 then acc, t else
-        loop (depth-1) (t :: acc) (next ())
-    | EOF -> error t.pos "unterminated macro argument"
-    | _ -> loop depth (t :: acc) (next ())
-  in
-  let l, lookahead' = loop 0 [] lookahead in
-  List.rev l, lookahead'
+(* token stream *)
+type parser_ = {
+  next : unit -> token;
+  mutable tok : token;
+  mutable tokq : token list
+}
 
-let parse_macro_arg_list next lookahead =
-  match lookahead.kind with
-  | RParen -> []
+let skip p =
+  match p.tokq with
+  | [] -> p.tok <- p.next ()
+  | hd :: tl ->
+    p.tokq <- tl;
+    p.tok <- hd
+
+let getsym p =
+  let t = p.tok in
+  skip p;
+  t
+
+let ungetsym p t =
+  p.tokq <- p.tok :: p.tokq;
+  p.tok <- t
+
+let parse_macro_arg p =
+  let rec loop depth acc =
+    let t = p.tok in
+    match t.kind with
+    | Comma when depth = 0 -> acc
+    | LParen -> skip p; loop (depth+1) (t :: acc)
+    | RParen ->
+      if depth = 0 then acc else begin
+        skip p;
+        loop (depth-1) (t :: acc)
+      end
+    | EOF -> error t.pos "unterminated macro argument"
+    | _ -> skip p; loop depth (t :: acc)
+  in
+  let l = loop 0 [] in
+  List.rev l
+
+let parse_macro_arg_list p =
+  match getsym p with
+  | { kind = RParen; _ } -> []
   | _ ->
-    let rec loop lookahead =
-      let arg, lookahead' = parse_macro_arg next lookahead in
-      match lookahead'.kind with
-      | RParen -> [arg]
-      | Comma -> arg :: loop (next ())
-      | _ -> error lookahead'.pos "macro argument list"
+    let rec loop () =
+      let arg = parse_macro_arg p in
+      match getsym p with
+      | { kind = RParen; _ } -> [arg]
+      | { kind = Comma; _ } -> arg :: loop ()
+      | { pos; _ } -> error pos "macro argument list"
     in
-    loop lookahead
+    loop ()
 
 (* s is guaranteed to be non-empty *)
 let parse_token s =
   let lexbuf = Lexing.from_string s in
-  let lex_state = Lexer.init_state () in
-  let t = Lexer.token lex_state lexbuf in
+  let ws_buf = Buffer.create 0 in
+  let t = Lexer.token ws_buf lexbuf in
   if lexbuf.lex_start_pos > 0 ||
      lexbuf.lex_curr_pos < String.length s
   then error Lexing.dummy_pos (Printf.sprintf "not a valid token: ‘%s’" s);
@@ -170,40 +182,34 @@ let stringify pos ws l =
       Buffer.contents buf
   in
   { kind = StringLit; text = quote s;
-    pos; ws = ""; no_expand_list = [] }
+    pos; ws = "" }
+
+let get_noexp_list = function
+  | { kind = Ident l; _ } -> l
+  | _ -> []
 
 let concat_token pos t1 t2 =
   let text = t1.text ^ t2.text in
-  { kind = parse_token text; text;
-    pos; ws = ""; no_expand_list = [] }
-
-let rec parse_macro_body param_map = function
-  | Verbatim { kind = Ident; text = s; _ } :: tl
-    when M.mem s param_map ->
-    let i = M.find s param_map in
-    parse_macro_body param_map (Param i :: tl)
-  | (Verbatim { kind = Hash; ws; _ } as hd1) ::
-    (Verbatim { kind = Ident; text = s; _ } as hd2) :: tl ->
-    begin match M.find s param_map with
-      | i -> Stringify (ws, i) :: parse_macro_body param_map tl
-      | exception Not_found -> hd1 :: hd2 :: parse_macro_body param_map tl
-    end
-  | hd1 :: Verbatim { kind = HashHash; pos; _ } :: tl ->
-    let hd', tl' =
-      match parse_macro_body param_map tl with
-      | h::t -> h, t
-      | _ -> error pos "operand of ## missing"
-    in
-    Concat (hd1, hd') :: tl'
-  | hd :: tl -> hd :: parse_macro_body param_map tl
-  | [] -> []
+  let kind =
+    match parse_token text with
+    | Ident _ -> Ident (get_noexp_list t1 @ get_noexp_list t2)
+    | k -> k
+  in
+  { kind; text; pos; ws = "" }
 
 let rec subst_token (macro_name, noexp, pos, ws as token_info) arg_tab = function
-  | Verbatim u -> [{ u with no_expand_list = macro_name :: noexp; pos }]
+  | Verbatim ({ kind = Ident _; _ } as t) ->
+    [{ t with kind = Ident (macro_name :: noexp); pos }]
+  | Verbatim t ->
+    [{ t with pos }]
   | Param i ->
     arg_tab.(i) |> List.map
-      (fun u -> { u with no_expand_list = macro_name :: u.no_expand_list })
-  | Stringify (ws, i) -> [stringify pos ws arg_tab.(i)]
+      (function
+        | { kind = Ident l; _ } as t ->
+          { t with kind = Ident (macro_name :: l) }
+        | t -> t)
+  | Stringify (ws, i) ->
+    [stringify pos ws arg_tab.(i)]
   | Concat (u1, u2) ->
     let u1' = subst_token token_info arg_tab u1 in
     let u2' = subst_token token_info arg_tab u2 in
@@ -219,15 +225,9 @@ let rec subst_token (macro_name, noexp, pos, ws as token_info) arg_tab = functio
         l1 @ concat_token pos t1 t2 :: l2
     end
   | Magic_FILE ->
-    [{ kind = StringLit; text = quote pos.pos_fname; pos; ws; no_expand_list = [] }]
+    [{ kind = StringLit; text = quote pos.pos_fname; pos; ws }]
   | Magic_LINE ->
-    [{ kind = IntLit; text = string_of_int pos.pos_lnum; pos; ws; no_expand_list = [] }]
-
-let directive_type dir =
-  let lex_state = Lexer.init_state () in
-  let lexbuf = Lexing.from_string dir in
-  let t = lex_raw lex_state lexbuf in
-  t.text
+    [{ kind = IntLit; text = string_of_int pos.pos_lnum; pos; ws }]
 
 let rec find_include_file search_path filename =
   match search_path with
@@ -254,14 +254,6 @@ let pop_include st =
     st.include_stack <- tl;
     st.lexbuf <- lb;
     st.input_chan <- ic
-
-type parser_ = {
-  next : unit -> token;
-  mutable tok : token
-}
-
-let getsym p =
-  p.tok <- p.next ()
 
 let parse_int s =
   int_of_string s (* TODO *)
@@ -321,19 +313,33 @@ let eval_prefix_op op value =
   | _ -> assert false
 
 let eval_binary_op op v1 v2 =
-  match op with
+  match op.kind with
   | Star -> v1*v2
-  | Slash -> v1/v2 (* TODO: check div by 0 *)
-  | Percent -> v1 mod v2 (* TODO: check div by 0 *)
+  | Slash ->
+    if v2 = 0 then error op.pos "division by 0" else v1/v2
+  | Percent ->
+    if v2 = 0 then error op.pos "division by 0" else v1 mod v2
   | Plus -> v1+v2
   | Minus -> v1-v2
-
+  | LtLt -> v1 lsl v2
+  | GtGt -> v2 lsr v2
+  | Lt -> if v1<v2 then 1 else 0
+  | Gt -> if v1>v2 then 1 else 0
+  | LtEq -> if v1 <= v2 then 1 else 0
+  | GtEq -> if v1 >= v2 then 1 else 0
+  | EqEq -> if v1 = v2 then 1 else 0
+  | BangEq -> if v1 <> v2 then 1 else 0
+  | And -> v1 land v2
+  | Circ -> v1 lxor v2
+  | Pipe -> v1 lor v2
+  | AndAnd -> if v1<>0 && v2<>0 then 1 else 0
+  | PipePipe -> if v1<>0 || v2<>0 then 1 else 0
   | _ -> assert false
 
 let rec parse_prefix_expr p =
   if is_prefix_op p.tok.kind then begin
     let op = p.tok.kind in
-    getsym p;
+    skip p;
     let value = parse_prefix_expr p in
     eval_prefix_op op value
   end else parse_atom p
@@ -342,8 +348,8 @@ let parse_binary_expr parse_sub_expr op_test p =
   let v1 = parse_sub_expr p in
   let rec loop v1 =
     if op_test p.tok.kind then begin
-      let op = p.tok.kind in
-      getsym p;
+      let op = p.tok in
+      skip p;
       let v2 = parse_sub_expr p in
       eval_binary_op op v1 v2
     end else v1
@@ -359,7 +365,7 @@ let parse_shift_expr = parse_binary_expr parse_add_expr
 let parse_rel_expr = parse_binary_expr parse_shift_expr
     (function Lt | Gt | LtEq | GtEq -> true | _ -> false)
 let parse_eq_expr = parse_binary_expr parse_rel_expr
-    (function Eq | BangEq -> true | _ -> false)
+    (function EqEq | BangEq -> true | _ -> false)
 let parse_and_expr = parse_binary_expr parse_eq_expr ((=) And)
 let parse_xor_expr = parse_binary_expr parse_and_expr ((=) Circ)
 let parse_or_expr = parse_binary_expr parse_xor_expr ((=) Pipe)
@@ -367,82 +373,101 @@ let parse_log_and_expr = parse_binary_expr parse_or_expr ((=) AndAnd)
 let parse_log_or_expr = parse_binary_expr parse_log_and_expr ((=) PipePipe)
 
 let expect p text =
-  if p.tok.text = text then getsym p else
+  if p.tok.text = text then skip p else
     error p.tok.pos (Printf.sprintf "‘%s’ expected" text)
+
+let expect_ident p =
+  let t = getsym p in
+  match t.kind with
+  | Ident _ -> t.text
+  | _ -> error t.pos "identifier expected"
 
 let rec parse_cond_expr p =
   let v1 = parse_log_or_expr p in
   if p.tok.kind = Quest then begin
-    getsym p;
+    skip p;
     let v2 = parse_cond_expr p in
     expect p ":";
     let v3 = parse_cond_expr p in
     if v1 <> 0 then v2 else v3
   end else v1
 
-let rec push_token_list s = function
+let rec unget_token_list p = function
   | [] -> ()
   | hd :: tl ->
-    push_token_list s tl; Stack.push hd s
+    unget_token_list p tl; ungetsym p hd
 
-let expect_s s text =
-  let t = Stack.pop s in
-  if t.text <> text then error t.pos (Printf.sprintf "‘%s’ expected" text)
-
-let expect_ident s =
-  let t = Stack.pop s in
-  if t.kind = Ident then t.text else error t.pos "identifier expected"
-
-let subject_to_expansion macro_tab peek t =
-  not (List.mem t.text t.no_expand_list) &&
-  match H.find macro_tab t.text with
+let subject_to_expansion macro_tab p text noexp =
+  not (List.mem text noexp) &&
+  match H.find macro_tab text with
   | ObjLike _ -> true
-  | FunLike _ -> (peek ()).kind = LParen
+  | FunLike _ -> p.tok.kind = LParen
   | exception Not_found -> false
 
 let at_bol p =
   Lexing.(p.pos_cnum = p.pos_bol)
 
-let lex_raw' st =
-  if Stack.is_empty st.token_stack then
-    lex_raw st.lex_state st.lexbuf
-  else Stack.pop st.token_stack
+let make_parser next =
+  { next; tok = next (); tokq = [] }
 
-let peek st =
-  if Stack.is_empty st.token_stack then
-    let t = lex_raw st.lex_state st.lexbuf in
-    let () = Stack.push t st.token_stack in
-    t
-  else Stack.top st.token_stack
+let rec parse_macro_body param_map p =
+  let parse_simple () =
+  match getsym p with
+  | { kind = Ident _; text = name; _ } as t ->
+    begin match M.find name param_map with
+      | i -> Param i
+      | exception Not_found -> Verbatim t
+    end
+  | { kind = Hash; ws; _ } as t ->
+    let name = expect_ident p in
+    begin match M.find name param_map with
+      | i -> Stringify (ws, i)
+      | exception Not_found -> Verbatim t
+    end
+  | t -> assert (t.kind <> EOF); Verbatim t
+  in
+  let rec parse_binary () =
+    let rt1 = parse_simple () in
+    if p.tok.kind = HashHash then
+      let () = skip p in
+      let rt2 = parse_simple () in
+      Concat (rt1, rt2)
+    else rt1
+  in
+  let rec loop acc =
+    if p.tok.kind = EOF then acc else
+      loop (parse_binary () :: acc)
+  in
+  loop [] |> List.rev
 
-let rec lex_simple macro_tab token_stack =
-  let t = Stack.pop token_stack in
+let rec getsym_expand macro_tab p =
+  let t = getsym p in
   match t.kind with
-  | Ident when subject_to_expansion macro_tab
-        (fun () -> Stack.top token_stack) t ->
-    push_token_list token_stack
-      (expand_ident macro_tab (fun () -> Stack.pop token_stack) t);
-    lex_simple macro_tab token_stack
+  | Ident noexp when subject_to_expansion macro_tab
+        p t.text noexp ->
+    expand_ident macro_tab p t;
+    getsym_expand macro_tab p
   | _ -> t
 
-and expand_ident macro_tab next t : token list =
+and expand_ident macro_tab p t : unit =
+  let noexp = match t.kind with Ident l -> l | _ -> assert false in
   let s = t.text in
   let expand arg_tab body =
     let l' =
-      body |> List.map (subst_token (s, t.no_expand_list, t.pos, t.ws) arg_tab) |> List.concat
+      body |> List.map (subst_token (s, noexp, t.pos, t.ws) arg_tab) |> List.concat
     in
     begin match l' with
       | [] -> []
       | hd::tl -> { hd with ws = t.ws } :: tl
     end
   in
-  begin match H.find macro_tab s with
+  let l =
+    match H.find macro_tab s with
     | ObjLike body -> expand [||] body
     | FunLike (arity, body) ->
-      let next_token = next () in
-      assert (next_token.kind = LParen);
+      assert (p.tok.kind = LParen);
       let arg_tab =
-        let args = parse_macro_arg_list next (next ()) in
+        let args = parse_macro_arg_list p in
         let n_arg = List.length args in
         if n_arg = arity then
           args |> List.map (expand_token_list macro_tab) |>
@@ -454,119 +479,108 @@ and expand_ident macro_tab next t : token list =
          Format.printf "[%d]=‘%a’@." i pp_token_list l
          end; *)
       expand arg_tab body
-  end
+  in
+  unget_token_list p l
 
-and expand_token_list macro_tab l =
-  (* Format.printf "expanding ‘%a’@." pp_token_list l; *)
-  let s = Stack.create () in
-  Stack.push eof s;
-  push_token_list s l;
+and expand_token_list macro_tab tok_list =
+  (* Format.printf "expanding ‘%a’@." pp_token_list tok_list; *)
+  let eof = {
+    kind = EOF;
+    text = "";
+    pos = Lexing.dummy_pos;
+    ws = ""
+  } in
+  let p = make_parser (fun () -> eof) in
+  unget_token_list p tok_list;
   let rec loop acc =
-    match lex_simple macro_tab s with
+    match getsym_expand macro_tab p with
     | { kind = EOF; _ } -> acc
     | t -> loop (t::acc)
   in
   loop [] |> List.rev
 (* |> fun result ->
-   Format.printf "‘%a’ → ‘%a’@." pp_token_list l pp_token_list result;
+   Format.printf "‘%a’ → ‘%a’@." pp_token_list tok_list pp_token_list result;
    result *)
 
-and expand_cond macro_tab s q =
-  match Stack.pop s with
+let rec expand_cond macro_tab p q =
+  match getsym p with
   | { text = "defined"; _ } as t ->
     let name =
-      match Stack.pop s with
+      match getsym p with
       | { kind = LParen; _ } ->
-        let name = expect_ident s in
-        let () = expect_s s ")" in
+        let name = expect_ident p in
+        let () = expect p ")" in
         name
-      | { kind = Ident; text; _ } -> text
+      | { kind = Ident _; text; _ } -> text
       | { pos; _ } -> error pos "syntax error"
     in
     let text = if H.mem macro_tab name then "1" else "0" in
     Queue.push { t with kind = IntLit; text } q;
-    expand_cond macro_tab s q
-  | { kind = Ident; _ } as t ->
+    expand_cond macro_tab p q
+  | { kind = Ident noexp; text; _ } as t ->
     let () =
-      if subject_to_expansion macro_tab (fun () -> Stack.top s) t then begin
-        let l = expand_ident macro_tab (fun () -> Stack.pop s) t in
-        push_token_list s l
-      end else Queue.push { t with kind = IntLit; text = "0" } q
+      if subject_to_expansion macro_tab p text noexp then
+        expand_ident macro_tab p t
+      else Queue.push { t with kind = IntLit; text = "0" } q
     in
-    expand_cond macro_tab s q
+    expand_cond macro_tab p q
   | { kind = EOF; _ } -> ()
   | t ->
     Queue.push t q;
-    expand_cond macro_tab s q
+    expand_cond macro_tab p q
 
-and handle_else st pos =
+let handle_else st p pos =
+  expect p "";
   match st.cond_stack with
   | [] -> error pos "#else without #if"
   | (_, Else) :: _ -> error pos "duplicate #else"
   | (_, Before) :: tl -> st.cond_stack <- (true, Else) :: tl
   | (_, After) :: tl -> st.cond_stack <- (false, Else) :: tl
 
-and handle_endif st pos =
+let handle_endif st p pos =
+  expect p "";
   match st.cond_stack with
   | [] -> error pos "#endif without #if"
   | _::tl -> st.cond_stack <- tl
 
-and handle_directive st pos dir =
-(*   Format.eprintf "directive: %s@." dir; *)
-  let lex_state = Lexer.init_state () in
+let handle_elif st p pos =
+  match st.cond_stack with
+  | [] -> error pos "#elif without #if"
+  | (_, Else) :: _ -> error pos "#elif after #else"
+  | (true, After) :: tl -> st.cond_stack <- (false, After) :: tl
+  | (false, After) :: _ -> ()
+  | (_, Before) :: tl ->
+    let q = Queue.create () in
+    expand_cond st.macro_tab p q;
+    let active = parse_cond_expr (make_parser (fun () -> Queue.pop q)) <> 0 in
+    st.cond_stack <- (active, if active then After else Before) :: tl
+
+let handle_directive st (pos : Lexing.position) dir =
+  (*   Format.eprintf "directive: %s@." dir; *)
+  let ws_buf = Buffer.create 16 in
   let lexbuf = Lexing.from_string dir in
-  lexbuf.lex_abs_pos <- pos.Lexing.pos_cnum;
+  lexbuf.lex_abs_pos <- pos.pos_cnum;
   lexbuf.lex_curr_p <- pos;
-  let next () = lex_raw lex_state lexbuf in
-  let expect_ident () =
-    let t = next () in
-    match t.kind with
-    | Ident -> t.text
-    | _ -> error t.pos "identifier expected"
-  in
-  let parse_token_list want_eof =
-    let rec loop acc =
-      let t = next () in
-      if t.kind = EOF then
-        if want_eof then t::acc else acc
-      else loop (t::acc)
-    in
-    loop [] |> List.rev
-  in
-  let dir_name_token = next () in
-  let handle_elif () =
-    match st.cond_stack with
-    | [] -> error dir_name_token.pos "#elif without #if"
-    | (_, Else) :: _ -> error dir_name_token.pos "#elif after #else"
-    | (true, After) :: tl -> st.cond_stack <- (false, After) :: tl
-    | (false, After) :: _ -> ()
-    | (_, Before) :: tl ->
-      let l = parse_token_list true in
-      let s = Stack.create () in
-      push_token_list s l;
-      let q = Queue.create () in
-      expand_cond st.macro_tab s q;
-      let p = { next = (fun () -> Queue.pop q); tok = Queue.pop q } in
-      let active = parse_cond_expr p <> 0 in
-      st.cond_stack <- (active, if active then After else Before) :: tl
-  in
+  let p = make_parser (fun () -> lex ws_buf lexbuf) in
+  let dir_name_token = getsym p in
   match st.cond_stack with
   | [] | (true, _) :: _ ->
     begin match dir_name_token.text with
       | "define" ->
-        let name = expect_ident () in
+        let name = expect_ident p in
         let def =
-          match next () with
+          match p.tok with
           | { kind = LParen; ws = ""; _ } ->
+            skip p;
             (* function-like macro *)
             let param_map, arity =
-              match next () with
+              match getsym p with
               | { kind = RParen; _ } -> M.empty, 0
-              | { kind = Ident; text = s; _ } ->
+              | { kind = Ident _; text = s; _ } ->
                 let rec loop m i =
-                  match next () with
+                  match getsym p with
                   | { kind = Comma; _ } ->
-                    let s = expect_ident () in
+                    let s = expect_ident p in
                     loop (M.add s i m) (i+1)
                   | { kind = RParen; _ } -> m, i
                   | { pos; _ } -> error pos "#define"
@@ -574,42 +588,33 @@ and handle_directive st pos dir =
                 loop (M.singleton s 0) 1
               | { pos; _ } -> error pos "#define"
             in
-            let body =
-              parse_macro_body param_map
-                (parse_token_list false |> List.map (fun t -> Verbatim t))
-            in
+            let body = parse_macro_body param_map p in
             FunLike (arity, body)
           | t ->
             (* object-like macro *)
-            let body =
-              parse_macro_body M.empty
-                ((t :: parse_token_list false) |> List.map (fun t -> Verbatim t))
-            in
+            let body = parse_macro_body M.empty p in
             ObjLike body
         in
         H.replace st.macro_tab name def
       | "undef" ->
-        let name = expect_ident () in
+        let name = expect_ident p in
+        expect p "";
         H.remove st.macro_tab name
       | "ifdef" ->
-        begin match parse_token_list false with
-          | [{ kind = Ident; text = name; _ }] ->
-            st.cond_stack <-
-              let active = H.mem st.macro_tab name in
-              (active, if active then After else Before) :: st.cond_stack
-          | _ -> error dir_name_token.pos "syntax error in #ifdef"
-        end
+        let name = expect_ident p in
+        expect p "";
+        st.cond_stack <-
+          let active = H.mem st.macro_tab name in
+          (active, if active then After else Before) :: st.cond_stack
       | "ifndef" ->
-        begin match parse_token_list false with
-          | [{ kind = Ident; text = name; _ }] ->
-            st.cond_stack <-
-              let active = not (H.mem st.macro_tab name) in
-              (active, if active then After else Before) :: st.cond_stack
-          | _ -> error dir_name_token.pos "syntax error in #ifndef"
-        end
-      | "elif" -> handle_elif ()
-      | "else" -> handle_else st dir_name_token.pos
-      | "endif" -> handle_endif st dir_name_token.pos
+        let name = expect_ident p in
+        expect p "";
+        st.cond_stack <-
+          let active = not (H.mem st.macro_tab name) in
+          (active, if active then After else Before) :: st.cond_stack
+      | "elif" -> handle_elif st p dir_name_token.pos
+      | "else" -> handle_else st p dir_name_token.pos
+      | "endif" -> handle_endif st p dir_name_token.pos
       | "include" ->
         let get_filename lexbuf =
           let s = Lexing.lexeme lexbuf in
@@ -634,46 +639,39 @@ and handle_directive st pos dir =
             end
         end
       | "if" ->
-        let l = parse_token_list true in
-        let s = Stack.create () in
-        push_token_list s l;
         let q = Queue.create () in
-        expand_cond st.macro_tab s q;
-(*         Format.eprintf "%a@." pp_token_list (Queue.to_seq q |> List.of_seq) *)
-        let p = { next = (fun () -> Queue.pop q); tok = Queue.pop q } in
-        let active = parse_cond_expr p <> 0 in
+        expand_cond st.macro_tab p q;
+        let active = parse_cond_expr (make_parser (fun () -> Queue.pop q)) <> 0 in
         st.cond_stack <- (active, if active then After else Before) :: st.cond_stack
       | "" -> () (* null directive *)
       | _ -> error dir_name_token.pos "invalid directive"
     end
   | (false, _) :: _ ->
     begin match dir_name_token.text with
-      | "elif" -> handle_elif ()
-      | "else" -> handle_else st dir_name_token.pos
-      | "endif" -> handle_endif st dir_name_token.pos
+      | "elif" -> handle_elif st p dir_name_token.pos
+      | "else" -> handle_else st p dir_name_token.pos
+      | "endif" -> handle_endif st p dir_name_token.pos
       | _ -> ()
-(*       | d -> Format.eprintf "skipping directive %s@." d *)
+      (*       | d -> Format.eprintf "skipping directive %s@." d *)
     end
 
-and lex expand st =
-  let t =
-    if Stack.is_empty st.token_stack then begin
-      begin match st.cond_stack with
-        | [] | (true, _) :: _ ->
-          lex_raw st.lex_state st.lexbuf
-        | (false, _) :: _ ->
-          if Lexer.skip_to_directive st.lexbuf then
-            wrap_token_no_ws Hash st.lexbuf
-          else
-            error st.lexbuf.lex_curr_p "unterminated #if"
-      end
-    end else Stack.pop st.token_stack
-  in
-  match t.kind with
-  | Hash ->
-    if at_bol t.pos then begin
+let make_preproc_parser st =
+  let rec next () =
+    (* token queue is empty now *)
+    let t =
+      match st.cond_stack with
+      | [] | (true, _) :: _ ->
+        lex st.ws_buf st.lexbuf
+      | (false, _) :: _ ->
+        if Lexer.skip_to_directive st.lexbuf then
+          wrap_token_no_ws Hash st.lexbuf
+        else
+          error st.lexbuf.lex_curr_p "unterminated #if"
+    in
+    match t.kind with
+    | Hash when at_bol t.pos ->
       let dir_pos = st.lexbuf.lex_curr_p in
-      let _ = Lexer.directive st.lexbuf in
+      Lexer.directive st.lexbuf;
       let dir = Lexing.lexeme st.lexbuf in
       assert (st.lexbuf.lex_curr_p.pos_cnum = st.lexbuf.lex_curr_p.pos_bol);
       begin
@@ -682,24 +680,22 @@ and lex expand st =
         with Error (pos, msg) ->
           Format.eprintf "%a: %s@." pp_pos pos msg;
       end;
-      Buffer.add_string st.lex_state.Lexer.whitespace t.ws;
-      lex expand st
-    end else t
-  | Ident when expand && subject_to_expansion st.macro_tab (fun () -> peek st) t ->
-    push_token_list st.token_stack
-      (expand_ident st.macro_tab (fun () -> lex false st) t);
-    lex true st
-  | EOF ->
-    if st.include_stack = [] then t else
-      let () = pop_include st in
-      let t' = lex expand st in
-      { t' with ws = t.ws ^ t'.ws }
-  | _ -> t
+      Buffer.add_string st.ws_buf t.ws;
+      next ()
+    | EOF ->
+      if st.include_stack = [] then t else
+        let () = pop_include st in
+        let t' = next () in
+        { t' with ws = t.ws ^ t'.ws }
+    | _ -> t
+  in
+  make_parser next
 
 let make_supplier ic =
   let st = init_state ic in
+  let p = make_preproc_parser st in
   fun () ->
-    let token = lex true st in
+    let token = getsym_expand st.macro_tab p in
 (*     Format.printf "%d: %a ‘%s’\n" token.pos pp_pptoken token.kind token.text; *)
     let start_pos = token.pos in
     let end_pos =
@@ -715,8 +711,9 @@ let make_supplier ic =
 
 let main () =
   let st = init_state stdin in
+  let p = make_preproc_parser st in
   let rec loop () =
-    let t = lex true st in
+    let t = getsym_expand st.macro_tab p in
     print_string t.ws;
     print_string t.text;
     if t.kind = EOF then () else loop ()

@@ -14,13 +14,6 @@ let at_bol lexbuf =
     lexbuf.lex_start_pos lexbuf.lex_curr_p.pos_bol; *)
   lexbuf.lex_start_pos = lexbuf.lex_curr_p.pos_bol
 
-type state = {
-  whitespace : Buffer.t
-}
-
-let init_state () =
-  { whitespace = Buffer.create 64 }
-
 module M = Map.Make(String)
 
 type pos = {
@@ -29,9 +22,9 @@ type pos = {
   mutable cnum : int
 }
 
-let add_whitespace s lexbuf =
+let add_whitespace b lexbuf =
   let ws = lexeme lexbuf in
-  Buffer.add_string s.whitespace ws;
+  Buffer.add_string b ws;
   let pos =
     let p = lexbuf.lex_start_p in
     {
@@ -65,7 +58,6 @@ let letter = ['a'- 'z' 'A'-'Z']
 let usuffix = ['u' 'U']
 let lsuffix = "l"|"L"|"ll"|"LL"
 let intsuffix = lsuffix | usuffix | usuffix lsuffix | lsuffix usuffix
-              | usuffix ? "i64"
 
 
 let hexprefix = '0' ['x' 'X']
@@ -160,7 +152,7 @@ rule token s = parse
 | ';'           { Semi }
 | ','           { Comma }
 | '.'           { Dot }
-| ident         { Ident }
+| ident         { Ident [] }
 | eof           { EOF }
 | "##"          { HashHash }
 | '#'           { Hash }

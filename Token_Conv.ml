@@ -37,7 +37,7 @@ let convert_token kind text =
   match kind with
   | EOF ->
     P.EOF
-  | Ident ->
+  | Ident _ ->
     begin match M.find text keyword_map with
       | kw -> kw
       | exception Not_found -> P.Ident text
