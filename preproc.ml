@@ -34,6 +34,7 @@ type cond_state =
   | Before      (* before #if/#elif with true condition *)
   | After       (* after #if/#elif with true condition *)
   | Else        (* after #else *)
+  | Inactive
 
 type state = {
   ws_buf : Buffer.t;
@@ -95,6 +96,7 @@ let lex ws_buf lexbuf =
       flush_buffer ws_buf
   in
 (*   Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text; *)
+(*   Format.eprintf "%a: ‘%s’@." pp_pos pos text; *)
   { kind; text; pos; ws }
 
 exception Error of Lexing.position * string
@@ -130,6 +132,16 @@ let getsym p =
 let ungetsym p t =
   p.tokq <- p.tok :: p.tokq;
   p.tok <- t
+
+let expect p text =
+  if p.tok.text = text then skip p else
+    error p.tok.pos (Printf.sprintf "‘%s’ expected" text)
+
+let expect_ident p =
+  let t = getsym p in
+  match t.kind with
+  | Ident _ -> t.text
+  | _ -> error t.pos "identifier expected"
 
 let parse_macro_arg p =
   let rec loop depth acc =
@@ -331,14 +343,6 @@ let parse_char s =
   in
   Char.code c
 
-let parse_atom p =
-  match getsym p with
-  | { kind = IntLit; text; _ } ->
-    parse_int text
-  | { kind = CharLit; text; _ } ->
-    parse_char text
-  | { pos; _ } -> error pos "invalid token"
-
 let is_prefix_op = function
   | Minus | Tilde | Bang -> true
   | _ -> false
@@ -374,14 +378,6 @@ let eval_binary_op op v1 v2 =
   | PipePipe -> if v1<>0 || v2<>0 then 1 else 0
   | _ -> assert false
 
-let rec parse_prefix_expr p =
-  if is_prefix_op p.tok.kind then begin
-    let op = p.tok.kind in
-    skip p;
-    let value = parse_prefix_expr p in
-    eval_prefix_op op value
-  end else parse_atom p
-
 let parse_binary_expr parse_sub_expr op_test p =
   let v1 = parse_sub_expr p in
   let rec loop v1 =
@@ -394,33 +390,43 @@ let parse_binary_expr parse_sub_expr op_test p =
   in
   loop v1
 
-let parse_mult_expr = parse_binary_expr parse_prefix_expr
-    (function Star | Slash | Percent -> true | _ -> false)
-let parse_add_expr = parse_binary_expr parse_mult_expr
-    (function Plus | Minus -> true | _ -> false)
-let parse_shift_expr = parse_binary_expr parse_add_expr
-    (function LtLt | GtGt -> true | _ -> false)
-let parse_rel_expr = parse_binary_expr parse_shift_expr
-    (function Lt | Gt | LtEq | GtEq -> true | _ -> false)
-let parse_eq_expr = parse_binary_expr parse_rel_expr
-    (function EqEq | BangEq -> true | _ -> false)
-let parse_and_expr = parse_binary_expr parse_eq_expr ((=) And)
-let parse_xor_expr = parse_binary_expr parse_and_expr ((=) Circ)
-let parse_or_expr = parse_binary_expr parse_xor_expr ((=) Pipe)
-let parse_log_and_expr = parse_binary_expr parse_or_expr ((=) AndAnd)
-let parse_log_or_expr = parse_binary_expr parse_log_and_expr ((=) PipePipe)
+let rec parse_atom p =
+  match getsym p with
+  | { kind = IntLit; text; _ } ->
+    parse_int text
+  | { kind = CharLit; text; _ } ->
+    parse_char text
+  | { kind = LParen; _ } ->
+    let v = parse_cond_expr p in
+    expect p ")";
+    v
+  | { pos; _ } -> error pos "invalid token"
 
-let expect p text =
-  if p.tok.text = text then skip p else
-    error p.tok.pos (Printf.sprintf "‘%s’ expected" text)
+and parse_prefix_expr p =
+  if is_prefix_op p.tok.kind then begin
+    let op = p.tok.kind in
+    skip p;
+    let value = parse_prefix_expr p in
+    eval_prefix_op op value
+  end else parse_atom p
 
-let expect_ident p =
-  let t = getsym p in
-  match t.kind with
-  | Ident _ -> t.text
-  | _ -> error t.pos "identifier expected"
+and parse_mult_expr p = parse_binary_expr parse_prefix_expr
+    (function Star | Slash | Percent -> true | _ -> false) p
+and parse_add_expr p = parse_binary_expr parse_mult_expr
+    (function Plus | Minus -> true | _ -> false) p
+and parse_shift_expr p = parse_binary_expr parse_add_expr
+    (function LtLt | GtGt -> true | _ -> false) p
+and parse_rel_expr p = parse_binary_expr parse_shift_expr
+    (function Lt | Gt | LtEq | GtEq -> true | _ -> false) p
+and parse_eq_expr p = parse_binary_expr parse_rel_expr
+    (function EqEq | BangEq -> true | _ -> false) p
+and parse_and_expr p = parse_binary_expr parse_eq_expr ((=) And) p
+and parse_xor_expr p = parse_binary_expr parse_and_expr ((=) Circ) p
+and parse_or_expr p = parse_binary_expr parse_xor_expr ((=) Pipe) p
+and parse_log_and_expr p = parse_binary_expr parse_or_expr ((=) AndAnd) p
+and parse_log_or_expr p = parse_binary_expr parse_log_and_expr ((=) PipePipe) p
 
-let rec parse_cond_expr p =
+and parse_cond_expr p =
   let v1 = parse_log_or_expr p in
   if p.tok.kind = Quest then begin
     skip p;
@@ -570,6 +576,7 @@ let handle_else st p =
   | (_, Else) :: _ -> error pos "duplicate #else"
   | (_, Before) :: tl -> st.cond_stack <- (true, Else) :: tl
   | (_, After) :: tl -> st.cond_stack <- (false, Else) :: tl
+  | (_, Inactive) :: _ -> ()
 
 let handle_endif st p =
   let pos = p.tok.pos in
@@ -590,9 +597,10 @@ let handle_elif st p =
   | (_, Before) :: tl ->
     let active = parse_cond (make_cond_expander st.macro_tab p) <> 0 in
     st.cond_stack <- (active, if active then After else Before) :: tl
+  | (_, Inactive) :: _ -> ()
 
 let handle_directive st (pos : Lexing.position) dir =
-  (*   Format.eprintf "directive: %s@." dir; *)
+(*   Printf.eprintf "directive: %s" dir; *)
   let ws_buf = Buffer.create 16 in
   let lexbuf = Lexing.from_string dir in
   lexbuf.lex_abs_pos <- pos.pos_cnum;
@@ -619,10 +627,10 @@ let handle_directive st (pos : Lexing.position) dir =
                     let s = expect_ident p in
                     loop (M.add s i m) (i+1)
                   | { kind = RParen; _ } -> m, i
-                  | { pos; _ } -> error pos "#define"
+                  | { pos; _ } -> error pos "invalid token"
                 in
                 loop (M.singleton s 0) 1
-              | { pos; _ } -> error pos "#define"
+              | { pos; _ } -> error pos "invalid token"
             in
             let body = parse_macro_body param_map p in
             FunLike (arity, body)
@@ -692,6 +700,8 @@ let handle_directive st (pos : Lexing.position) dir =
     end
   | (false, _) :: _ ->
     begin match p.tok.text with
+      | "if" | "ifdef" | "ifndef" ->
+        st.cond_stack <- (false, Inactive) :: st.cond_stack
       | "elif" -> handle_elif st p
       | "else" -> handle_else st p
       | "endif" -> handle_endif st p
@@ -700,6 +710,7 @@ let handle_directive st (pos : Lexing.position) dir =
     end
 
 let make_preproc_parser st =
+  let dir_buf = Buffer.create 256 in
   let rec next () =
     (* token queue is empty now *)
     let t =
@@ -719,9 +730,9 @@ let make_preproc_parser st =
     match t.kind with
     | Hash when at_bol t.pos ->
       let dir_pos = st.lexbuf.lex_curr_p in
-      Lexer.directive st.lexbuf;
+      Lexer.directive dir_buf st.lexbuf;
 (*       Format.eprintf "current position: %a@." pp_pos st.lexbuf.lex_curr_p; *)
-      let dir = Lexing.lexeme st.lexbuf in
+      let dir = flush_buffer dir_buf in
       assert (st.lexbuf.lex_curr_p.pos_cnum = st.lexbuf.lex_curr_p.pos_bol);
       begin
         try
@@ -733,7 +744,10 @@ let make_preproc_parser st =
     | EOF ->
       if st.include_stack = [] then
         { t with ws = flush_buffer st.ws_buf }
-      else next ()
+      else begin
+        pop_include st;
+        next ()
+      end
     | _ -> t
   in
   make_parser next

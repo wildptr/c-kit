@@ -197,9 +197,13 @@ and string s = parse
                   Buffer.clear s.string_contents }
 *)
 
-and directive = parse
-| [^'\n']* '\n' { next_line lexbuf }
-| [^'\n']* eof  { () }
+and directive b = parse
+| [^'\n']* '\n' { next_line lexbuf;
+                  let s = lexeme lexbuf in
+                  Buffer.add_string b s;
+                  let n = String.length s in
+                  if n >= 2 && s.[String.length s - 2] = '\\' then
+                    directive b lexbuf }
 
 and include_file = parse
 | blank         { include_file lexbuf }
