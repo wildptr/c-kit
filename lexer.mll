@@ -47,6 +47,8 @@ let add_whitespace b lexbuf =
       pos_lnum = pos.lnum;
       pos_bol = pos.bol }
 
+exception Error
+
 }
 
 let decdigit = ['0'-'9']
@@ -83,7 +85,7 @@ let floatsuffix = ['f' 'F' 'l' 'L']
 let floatnum = (decfloat | hexfloat) floatsuffix?
 
 let ident = (letter|'_'|'$')(letter|decdigit|'_'|'$')*
-let blank = [' ' '\t' '\012' '\r' '\n']+
+let blank = ([' ' '\t' '\012' '\r' '\n'] | "\\\n" )+
 
 let escape = '\\' _
 let hex_escape = '\\' ['x' 'X'] hexdigit+
@@ -91,6 +93,9 @@ let oct_escape = '\\' octdigit octdigit? octdigit?
 
 let string_elem = [^ '"'] | "\\\""
 let string = '"' string_elem* '"'
+
+let char_elem = [^ '\''] | "\\'"
+let char = "'" char_elem* "'"
 
 rule token s = parse
 | "/*"          { add_whitespace s lexbuf;
@@ -106,6 +111,7 @@ rule token s = parse
 | octnum        { IntLit }
 | intnum        { IntLit }
 | string        { StringLit }
+| char          { CharLit }
 | "..."         { Ellipsis }
 | "+="          { PlusEq }
 | "-="          { MinusEq }
@@ -201,6 +207,7 @@ and include_file = parse
                 { UserInclude }
 | '<' [^ '<' '>']* '>'
                 { SysInclude }
+| _             { raise Error }
 
 and skip_line = parse
 | '\n'          { next_line lexbuf }
@@ -210,5 +217,6 @@ and skip_line = parse
 (* invoke only at beginning of line *)
 and skip_to_directive = parse
 | '#'           { true }
+| '\n'          { next_line lexbuf; skip_to_directive lexbuf }
 | _             { skip_line lexbuf; skip_to_directive lexbuf }
 | eof           { false }

@@ -48,8 +48,11 @@ type state = {
   max_include_depth : int
 }
 
-let init_state input_chan =
+let init_state input_chan filename =
   let lexbuf = Lexing.from_channel input_chan in
+  lexbuf.lex_curr_p <-
+    { lexbuf.lex_curr_p with
+      pos_fname = filename };
   let macro_tab =
     [
       "__FILE__", ObjLike [Magic_FILE];
@@ -75,13 +78,20 @@ let wrap_token_no_ws kind lexbuf =
   let pos = lexbuf.lex_start_p in
   { kind; text; pos; ws = "" }
 
+let at_bol p =
+  Lexing.(p.pos_cnum = p.pos_bol)
+
 let lex ws_buf lexbuf =
   let kind = Lexer.token ws_buf lexbuf in
   let text = Lexing.lexeme lexbuf in
   let pos = lexbuf.lex_start_p in
-  let ws = Buffer.contents ws_buf in
-  Buffer.clear ws_buf;
-  (*   Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text; *)
+  let ws =
+    if kind = Hash && at_bol pos then "" else
+      let s = Buffer.contents ws_buf in
+      let () = Buffer.clear ws_buf in
+      s
+  in
+  Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text;
   { kind; text; pos; ws }
 
 exception Error of Lexing.position * string
@@ -136,8 +146,9 @@ let parse_macro_arg p =
   List.rev l
 
 let parse_macro_arg_list p =
-  match getsym p with
-  | { kind = RParen; _ } -> []
+  skip p; (* '(' *)
+  match p.tok.kind with
+  | RParen -> skip p; []
   | _ ->
     let rec loop () =
       let arg = parse_macro_arg p in
@@ -153,8 +164,8 @@ let parse_token s =
   let lexbuf = Lexing.from_string s in
   let ws_buf = Buffer.create 0 in
   let t = Lexer.token ws_buf lexbuf in
-  if lexbuf.lex_start_pos > 0 ||
-     lexbuf.lex_curr_pos < String.length s
+  if lexbuf.lex_start_p.pos_cnum > 0 ||
+     lexbuf.lex_curr_p.pos_cnum < String.length s
   then error Lexing.dummy_pos (Printf.sprintf "not a valid token: ‘%s’" s);
   t
 
@@ -243,6 +254,9 @@ let push_include st path =
   let ic = open_in path in
   st.include_stack <- (st.lexbuf, st.input_chan) :: st.include_stack;
   let lexbuf = Lexing.from_channel ic in
+  lexbuf.lex_curr_p <-
+    { lexbuf.lex_curr_p with
+      pos_fname = path };
   st.lexbuf <- lexbuf;
   st.input_chan <- ic
 
@@ -255,16 +269,36 @@ let pop_include st =
     st.lexbuf <- lb;
     st.input_chan <- ic
 
-let parse_int s =
-  int_of_string s (* TODO *)
-
-let is_oct_char = function
+let is_oct_digit = function
   | '0'..'7' -> true
   | _ -> false
 
-let oct_char_value = function
-  | '0'..'7' as c -> Char.code c - 48
+let is_digit = function
+  | '0'..'9' -> true
+  | _ -> false
+
+let digit_value = function
+  | '0'..'9' as c -> Char.code c - 48
   | _ -> assert false
+
+let parse_int s =
+  let n = String.length s in
+  let i = ref 0 in
+  let tmp = ref 0 in
+  if s.[0] = '0' then begin
+    (* octal *)
+    i := 1;
+    while !i < n && is_oct_digit s.[!i] do
+      tmp := !tmp*8 + digit_value s.[!i];
+      incr i
+    done
+  end else begin
+    while !i < n && is_digit s.[!i] do
+      tmp := !tmp*10 + digit_value s.[!i];
+      incr i
+    done
+  end;
+  !tmp
 
 let parse_escape_seq s i =
   match s.[i] with
@@ -279,8 +313,8 @@ let parse_escape_seq s i =
     let n = String.length s in
     let j = ref (i+1) in
     let tmp = ref 0 in
-    while !j < n && is_oct_char s.[!j] do
-      tmp := !tmp*8 + oct_char_value s.[!j];
+    while !j < n && is_oct_digit s.[!j] do
+      tmp := !tmp*8 + digit_value s.[!j];
       incr j
     done;
     Char.chr !tmp
@@ -303,13 +337,14 @@ let parse_atom p =
   | _ -> error p.tok.pos "invalid token"
 
 let is_prefix_op = function
-  | Minus | Tilde -> true
+  | Minus | Tilde | Bang -> true
   | _ -> false
 
-let eval_prefix_op op value =
+let eval_prefix_op op v =
   match op with
-  | Minus -> -value
-  | Tilde -> lnot value
+  | Minus -> -v
+  | Tilde -> lnot v
+  | Bang -> if v=0 then 1 else 0
   | _ -> assert false
 
 let eval_binary_op op v1 v2 =
@@ -404,9 +439,6 @@ let subject_to_expansion macro_tab p text noexp =
   | FunLike _ -> p.tok.kind = LParen
   | exception Not_found -> false
 
-let at_bol p =
-  Lexing.(p.pos_cnum = p.pos_bol)
-
 let make_parser next =
   { next; tok = next (); tokq = [] }
 
@@ -443,8 +475,7 @@ let rec parse_macro_body param_map p =
 let rec getsym_expand macro_tab p =
   let t = getsym p in
   match t.kind with
-  | Ident noexp when subject_to_expansion macro_tab
-        p t.text noexp ->
+  | Ident noexp when subject_to_expansion macro_tab p t.text noexp ->
     expand_ident macro_tab p t;
     getsym_expand macro_tab p
   | _ -> t
@@ -503,7 +534,7 @@ and expand_token_list macro_tab tok_list =
    result *)
 
 let rec expand_cond macro_tab p q =
-  match getsym p with
+  match getsym_expand macro_tab p with
   | { text = "defined"; _ } as t ->
     let name =
       match getsym p with
@@ -517,19 +548,17 @@ let rec expand_cond macro_tab p q =
     let text = if H.mem macro_tab name then "1" else "0" in
     Queue.push { t with kind = IntLit; text } q;
     expand_cond macro_tab p q
-  | { kind = Ident noexp; text; _ } as t ->
-    let () =
-      if subject_to_expansion macro_tab p text noexp then
-        expand_ident macro_tab p t
-      else Queue.push { t with kind = IntLit; text = "0" } q
-    in
+  | { kind = Ident _ } as t ->
+    Queue.push { t with kind = IntLit; text = "0" } q;
     expand_cond macro_tab p q
   | { kind = EOF; _ } -> ()
   | t ->
     Queue.push t q;
     expand_cond macro_tab p q
 
-let handle_else st p pos =
+let handle_else st p =
+  let pos = p.tok.pos in
+  skip p;
   expect p "";
   match st.cond_stack with
   | [] -> error pos "#else without #if"
@@ -537,13 +566,17 @@ let handle_else st p pos =
   | (_, Before) :: tl -> st.cond_stack <- (true, Else) :: tl
   | (_, After) :: tl -> st.cond_stack <- (false, Else) :: tl
 
-let handle_endif st p pos =
+let handle_endif st p =
+  let pos = p.tok.pos in
+  skip p;
   expect p "";
   match st.cond_stack with
   | [] -> error pos "#endif without #if"
   | _::tl -> st.cond_stack <- tl
 
-let handle_elif st p pos =
+let handle_elif st p =
+  let pos = p.tok.pos in
+  skip p;
   match st.cond_stack with
   | [] -> error pos "#elif without #if"
   | (_, Else) :: _ -> error pos "#elif after #else"
@@ -562,11 +595,11 @@ let handle_directive st (pos : Lexing.position) dir =
   lexbuf.lex_abs_pos <- pos.pos_cnum;
   lexbuf.lex_curr_p <- pos;
   let p = make_parser (fun () -> lex ws_buf lexbuf) in
-  let dir_name_token = getsym p in
   match st.cond_stack with
   | [] | (true, _) :: _ ->
-    begin match dir_name_token.text with
+    begin match p.tok.text with
       | "define" ->
+        skip p;
         let name = expect_ident p in
         let def =
           match p.tok with
@@ -597,60 +630,70 @@ let handle_directive st (pos : Lexing.position) dir =
         in
         H.replace st.macro_tab name def
       | "undef" ->
+        skip p;
         let name = expect_ident p in
         expect p "";
         H.remove st.macro_tab name
       | "ifdef" ->
+        skip p;
         let name = expect_ident p in
         expect p "";
         st.cond_stack <-
           let active = H.mem st.macro_tab name in
           (active, if active then After else Before) :: st.cond_stack
       | "ifndef" ->
+        skip p;
         let name = expect_ident p in
         expect p "";
         st.cond_stack <-
           let active = not (H.mem st.macro_tab name) in
           (active, if active then After else Before) :: st.cond_stack
-      | "elif" -> handle_elif st p dir_name_token.pos
-      | "else" -> handle_else st p dir_name_token.pos
-      | "endif" -> handle_endif st p dir_name_token.pos
+      | "elif" -> handle_elif st p
+      | "else" -> handle_else st p
+      | "endif" -> handle_endif st p
       | "include" ->
         let get_filename lexbuf =
           let s = Lexing.lexeme lexbuf in
           String.sub s 1 (String.length s - 2)
         in
-        begin match Lexer.include_file lexbuf with
-          | SysInclude ->
-            let filename = get_filename lexbuf in
-            begin match find_include_file st.sys_include_dirs filename with
-              | Some path ->
-                push_include st path
-              | None ->
-                error lexbuf.lex_start_p ("cannot find <" ^ filename ^ ">")
-            end
-          | UserInclude ->
-            let filename = get_filename lexbuf in
-            begin match find_include_file st.user_include_dirs filename with
-              | Some path ->
-                push_include st path
-              | None ->
-                error lexbuf.lex_start_p ("cannot find \"" ^ filename ^ "\"")
-            end
+        begin
+          try
+            match Lexer.include_file lexbuf with
+            | SysInclude ->
+              let filename = get_filename lexbuf in
+              begin match find_include_file st.sys_include_dirs filename with
+                | Some path ->
+                  push_include st path
+                | None ->
+                  error lexbuf.lex_start_p ("cannot find <" ^ filename ^ ">")
+              end
+            | UserInclude ->
+              let filename = get_filename lexbuf in
+              begin match find_include_file st.user_include_dirs filename with
+                | Some path ->
+                  push_include st path
+                | None ->
+                  error lexbuf.lex_start_p ("cannot find \"" ^ filename ^ "\"")
+              end
+          with Lexer.Error ->
+            error lexbuf.lex_start_p "syntax error"
         end
       | "if" ->
+        skip p;
         let q = Queue.create () in
         expand_cond st.macro_tab p q;
         let active = parse_cond_expr (make_parser (fun () -> Queue.pop q)) <> 0 in
         st.cond_stack <- (active, if active then After else Before) :: st.cond_stack
+      | "warning" -> () (* TODO *)
+      | "error" -> () (* TODO *)
       | "" -> () (* null directive *)
-      | _ -> error dir_name_token.pos "invalid directive"
+      | _ -> error p.tok.pos "invalid directive"
     end
   | (false, _) :: _ ->
-    begin match dir_name_token.text with
-      | "elif" -> handle_elif st p dir_name_token.pos
-      | "else" -> handle_else st p dir_name_token.pos
-      | "endif" -> handle_endif st p dir_name_token.pos
+    begin match p.tok.text with
+      | "elif" -> handle_elif st p
+      | "else" -> handle_else st p
+      | "endif" -> handle_endif st p
       | _ -> ()
       (*       | d -> Format.eprintf "skipping directive %s@." d *)
     end
@@ -663,6 +706,10 @@ let make_preproc_parser st =
       | [] | (true, _) :: _ ->
         lex st.ws_buf st.lexbuf
       | (false, _) :: _ ->
+(*      let lb = st.lexbuf in
+        Format.eprintf "about to skip, current position: %a@." pp_pos lb.lex_curr_p;
+        let buf = Bytes.sub_string lb.lex_buffer lb.lex_curr_pos lb.lex_buffer_len in
+        Format.eprintf "lexbuf contents: ‘%s’@." buf; *)
         if Lexer.skip_to_directive st.lexbuf then
           wrap_token_no_ws Hash st.lexbuf
         else
@@ -672,6 +719,7 @@ let make_preproc_parser st =
     | Hash when at_bol t.pos ->
       let dir_pos = st.lexbuf.lex_curr_p in
       Lexer.directive st.lexbuf;
+(*       Format.eprintf "current position: %a@." pp_pos st.lexbuf.lex_curr_p; *)
       let dir = Lexing.lexeme st.lexbuf in
       assert (st.lexbuf.lex_curr_p.pos_cnum = st.lexbuf.lex_curr_p.pos_bol);
       begin
@@ -680,7 +728,6 @@ let make_preproc_parser st =
         with Error (pos, msg) ->
           Format.eprintf "%a: %s@." pp_pos pos msg;
       end;
-      Buffer.add_string st.ws_buf t.ws;
       next ()
     | EOF ->
       if st.include_stack = [] then t else
@@ -691,8 +738,8 @@ let make_preproc_parser st =
   in
   make_parser next
 
-let make_supplier ic =
-  let st = init_state ic in
+let make_supplier ic filename =
+  let st = init_state ic filename in
   let p = make_preproc_parser st in
   fun () ->
     let token = getsym_expand st.macro_tab p in
@@ -710,7 +757,7 @@ let make_supplier ic =
     token', start_pos, end_pos
 
 let main () =
-  let st = init_state stdin in
+  let st = init_state stdin "<stdin>" in
   let p = make_preproc_parser st in
   let rec loop () =
     let t = getsym_expand st.macro_tab p in
@@ -718,4 +765,8 @@ let main () =
     print_string t.text;
     if t.kind = EOF then () else loop ()
   in
-  loop ()
+  try loop ()
+  with Failure msg ->
+    Format.eprintf "Failure ‘%s’ raised at %a@."
+      msg pp_pos st.lexbuf.lex_curr_p;
+    exit 1
