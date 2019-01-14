@@ -6,7 +6,7 @@ let next_line lexbuf =
   let p = lexbuf.lex_curr_p in
   lexbuf.lex_curr_p <-
     { p with
-      pos_bol = lexbuf.lex_curr_pos;
+      pos_bol = p.pos_cnum;
       pos_lnum = p.pos_lnum + 1 }
 
 let at_bol lexbuf =
@@ -52,8 +52,7 @@ let add_whitespace s lexbuf =
   lexbuf.lex_curr_p <-
     { lexbuf.lex_curr_p with
       pos_lnum = pos.lnum;
-      pos_bol = pos.bol;
-      pos_cnum = pos.cnum }
+      pos_bol = pos.bol }
 
 }
 
@@ -201,8 +200,8 @@ and string s = parse
 *)
 
 and directive = parse
-| [^'\n']* '\n' { next_line lexbuf; Directive }
-| [^'\n']* eof  { Directive }
+| [^'\n']* '\n' { next_line lexbuf }
+| [^'\n']* eof  { () }
 
 and include_file = parse
 | blank         { include_file lexbuf }
@@ -218,6 +217,6 @@ and skip_line = parse
 
 (* invoke only at beginning of line *)
 and skip_to_directive = parse
-| '#'           { directive lexbuf }
+| '#'           { true }
 | _             { skip_line lexbuf; skip_to_directive lexbuf }
-| eof           { EOF }
+| eof           { false }
