@@ -53,7 +53,7 @@ type pptoken =
   | Dot
   | Hash
   | HashHash
-  | Directive
+  | Unknown
 
 (*| DEFINE
   | ELSE

@@ -13,7 +13,7 @@ EXTLIB := extlib
 
 OCAMLBUILD      := ocamlbuild -use-ocamlfind -use-menhir -menhir "$(MENHIR) $(MENHIRFLAGS)" -package menhirLib -package $(EXTLIB) -package ppx_deriving.std
 
-MAIN            := parse
+MAIN            := cpp
 
 all: $(MAIN).native
 

@@ -146,6 +146,6 @@ let convert_token kind text =
     P.Hash
 
   (* these tokens are exclusive to the preprocessor *)
-  | Directive
+  | Unknown
   | HashHash ->
     failwith "convert_token"

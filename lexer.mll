@@ -162,6 +162,7 @@ rule token s = parse
 | eof           { EOF }
 | "##"          { HashHash }
 | '#'           { Hash }
+| _             { Unknown }
 
 and comment s = parse
 | "*/"          { add_whitespace s lexbuf }
