@@ -33,16 +33,18 @@ type cond_state =
   | After       (* after true branch, or nested within a false branch *)
   | Else        (* after #else *)
 
+type cond_stack = (bool * cond_state) list
+
 type state = {
   ws_buf : Buffer.t;
   mutable lexbuf : Lexing.lexbuf;
   macro_tab : macro_def H.t;
   (* fst indicates whether in active branch *)
-  mutable cond_stack : (bool * cond_state) list;
+  mutable cond_stack : cond_stack;
   sys_include_dirs : string list;
   user_include_dirs : string list;
   mutable input_chan : in_channel;
-  mutable include_stack : (Lexing.lexbuf * in_channel) list;
+  mutable include_stack : (Lexing.lexbuf * in_channel * cond_stack) list;
   max_include_depth : int
 }
 
@@ -81,8 +83,14 @@ let wrap_token_no_ws kind lexbuf =
   let pos = lexbuf.lex_start_p in
   { kind; text; pos; ws = "" }
 
-let at_bol p =
-  Lexing.(p.pos_cnum = p.pos_bol)
+let at_bol p ws =
+  String.length ws >= Lexing.(p.pos_cnum - p.pos_bol)
+
+(*match offset_from_bol ws with
+  | Some n ->
+    n = Lexing.(p.pos_cnum - p.pos_bol)
+  | None ->
+    p.Lexing.pos_cnum = 0*)
 
 let flush_buffer b =
   let s = Buffer.contents b in
@@ -93,13 +101,16 @@ let lex ws_buf lexbuf =
   let kind = Lexer.token ws_buf lexbuf in
   let text = Lexing.lexeme lexbuf in
   let pos = lexbuf.lex_start_p in
-  let ws =
-    if kind = Hash && at_bol pos || kind = EOF then "" else
-      flush_buffer ws_buf
-  in
-(*   Format.eprintf "%a: ‘%s’ ‘%s’@." pp_pos pos ws text; *)
-(*   Format.eprintf "%a: ‘%s’@." pp_pos pos text; *)
-  { kind; text; pos; ws }
+  let ws0 = Buffer.contents ws_buf in
+(*if kind = Hash then
+    Format.eprintf "%a: ‘%s%s’ %b@." pp_pos pos ws0 text (at_bol pos ws0);*)
+  if kind = Hash && at_bol pos ws0 then
+    { kind = Directive; text; pos; ws = "" }
+  else if kind = EOF then
+    { kind; text; pos; ws = "" }
+  else
+    let () = Buffer.clear ws_buf in
+    { kind; text; pos; ws = ws0 }
 
 exception Error of Lexing.position * string
 
@@ -215,6 +226,7 @@ let stringify pos ws l =
     | [] -> ""
     | hd::tl ->
       let buf = Buffer.create 16 in
+      (* whitespace before first token is deleted *)
       Buffer.add_string buf hd.text;
       tl |> List.iter begin fun t ->
         if t.ws <> "" then Buffer.add_char buf ' ';
@@ -222,8 +234,7 @@ let stringify pos ws l =
       end;
       Buffer.contents buf
   in
-  { kind = StringLit; text = quote s;
-    pos; ws = "" }
+  { kind = StringLit; text = quote s; pos; ws }
 
 let get_noexp_list = function
   | { kind = Ident l; _ } -> l
@@ -281,26 +292,27 @@ let rec find_include_file search_path filename =
     if Sys.file_exists path then Some path else
       find_include_file tl filename
 
-let push_include st pos path =
-  if List.length st.include_stack >= st.max_include_depth then
-    error pos "too many nested #include's";
+let push_include st path =
   let ic = open_in path in
-  st.include_stack <- (st.lexbuf, st.input_chan) :: st.include_stack;
+  st.include_stack <-
+    (st.lexbuf, st.input_chan, st.cond_stack) :: st.include_stack;
   let lexbuf = Lexing.from_channel ic in
   lexbuf.lex_curr_p <-
     { lexbuf.lex_curr_p with
       pos_fname = path };
   st.lexbuf <- lexbuf;
-  st.input_chan <- ic
+  st.input_chan <- ic;
+  st.cond_stack <- []
 
 let pop_include st =
   close_in st.input_chan;
   match st.include_stack with
-  | [] -> failwith "pop_include"
-  | (lb, ic) :: tl ->
+  | [] -> assert false
+  | (lb, ic, cs) :: tl ->
     st.include_stack <- tl;
     st.lexbuf <- lb;
-    st.input_chan <- ic
+    st.input_chan <- ic;
+    st.cond_stack <- cs
 
 let is_oct_digit = function
   | '0'..'7' -> true
@@ -316,16 +328,16 @@ let digit_value = function
 
 let parse_int s =
   let n = String.length s in
-  let i = ref 0 in
   let tmp = ref 0 in
   if s.[0] = '0' then begin
     (* octal *)
-    i := 1;
+    let i = ref 1 in
     while !i < n && is_oct_digit s.[!i] do
       tmp := !tmp*8 + digit_value s.[!i];
       incr i
     done
   end else begin
+    let i = ref 0 in
     while !i < n && is_digit s.[!i] do
       tmp := !tmp*10 + digit_value s.[!i];
       incr i
@@ -483,6 +495,8 @@ let rec parse_macro_body param_alist p =
         | exception Not_found -> Verbatim t
       end
     | { kind = Hash; ws; _ } as hash ->
+      (* According to the standard, each '#' in a function-like macro must be
+         followed by a parameter. Here we don't enforce this constraint. *)
       begin match p.tok.kind with
         | Ident _ ->
           let name = p.tok.text in
@@ -617,7 +631,8 @@ let handle_endif st p =
   expect_eof p;
   match st.cond_stack with
   | [] -> error pos "#endif without #if"
-  | _::tl -> st.cond_stack <- tl
+  | _::tl ->
+    st.cond_stack <- tl
 
 let handle_elif st p =
   let pos = p.tok.pos in
@@ -684,27 +699,21 @@ let unget_lexeme (lexbuf : Lexing.lexbuf) =
 
 let handle_include st p lexbuf =
   let parse lexbuf =
-    let get_filename lexbuf =
-      let s = Lexing.lexeme lexbuf in
-      String.sub s 1 (String.length s - 2)
+    let search_path =
+      match Lexer.include_file lexbuf with
+      | SysInclude -> st.sys_include_dirs
+      | UserInclude -> st.user_include_dirs
     in
-    match Lexer.include_file lexbuf with
-    | SysInclude ->
-      let filename = get_filename lexbuf in
-      begin match find_include_file st.sys_include_dirs filename with
-        | Some path ->
-          push_include st lexbuf.lex_start_p path
-        | None ->
-          error lexbuf.lex_start_p ("cannot find <" ^ filename ^ ">")
-      end
-    | UserInclude ->
-      let filename = get_filename lexbuf in
-      begin match find_include_file st.user_include_dirs filename with
-        | Some path ->
-          push_include st lexbuf.lex_start_p path
-        | None ->
-          error lexbuf.lex_start_p ("cannot find \"" ^ filename ^ "\"")
-      end
+    let s = Lexing.lexeme lexbuf in
+    let filename = String.sub s 1 (String.length s - 2) in
+    begin match find_include_file search_path filename with
+      | Some path ->
+        if List.length st.include_stack >= st.max_include_depth then
+          error lexbuf.lex_start_p "too many nested #include's";
+        push_include st path
+      | None ->
+        error lexbuf.lex_start_p ("cannot find " ^ s)
+    end
   in
   try parse lexbuf
   with Lexer.Error -> (* need macro expansion *)
@@ -790,19 +799,21 @@ let make_preproc_parser st =
     let t =
       match st.cond_stack with
       | [] | (true, _) :: _ ->
-        lex st.ws_buf st.lexbuf
+        let t = lex st.ws_buf st.lexbuf in
+        if String.length t.text >= 256 then Printf.eprintf "WARNING: very long token %s ‘%s’\n" (show_pptoken t.kind) t.text;
+        t
       | (false, _) :: _ ->
 (*      let lb = st.lexbuf in
         Format.eprintf "about to skip, current position: %a@." pp_pos lb.lex_curr_p;
         let buf = Bytes.sub_string lb.lex_buffer lb.lex_curr_pos lb.lex_buffer_len in
         Format.eprintf "lexbuf contents: ‘%s’@." buf; *)
-        if Lexer.skip_to_directive st.lexbuf then
-          wrap_token_no_ws Hash st.lexbuf
+        if Lexer.skip_to_directive true st.lexbuf then
+          wrap_token_no_ws Directive st.lexbuf
         else
           error st.lexbuf.lex_curr_p "unterminated #if"
     in
     match t.kind with
-    | Hash when at_bol t.pos ->
+    | Directive ->
       let dir_pos = st.lexbuf.lex_curr_p in
       Lexer.directive dir_buf st.lexbuf;
 (*       Format.eprintf "current position: %a@." pp_pos st.lexbuf.lex_curr_p; *)
@@ -819,6 +830,7 @@ let make_preproc_parser st =
       if st.include_stack = [] then
         { t with ws = flush_buffer st.ws_buf }
       else begin
+        if st.cond_stack <> [] then error t.pos "unterminated #if";
         pop_include st;
         next ()
       end
@@ -843,18 +855,3 @@ let make_supplier ic filename =
     Format.printf "%d:%d: %a ‘%s’\n"
       line col pp_pptoken token.kind token.text;
     token', start_pos, end_pos
-
-let main () =
-  let st = init_state stdin "<stdin>" in
-  let p = make_preproc_parser st in
-  let rec loop () =
-    let t = getsym_expand st.macro_tab p in
-    print_string t.ws;
-    print_string t.text;
-    if t.kind = EOF then () else loop ()
-  in
-  try loop ()
-  with Failure msg ->
-    Format.eprintf "Failure ‘%s’ raised at %a@."
-      msg pp_pos st.lexbuf.lex_curr_p;
-    exit 1

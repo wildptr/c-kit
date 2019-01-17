@@ -86,15 +86,16 @@ let floatnum = (decfloat | hexfloat) floatsuffix?
 
 let ident = (letter|'_'|'$')(letter|decdigit|'_'|'$')*
 let blank = ([' ' '\t' '\012' '\r' '\n'] | "\\\n" )+
+let blank_no_newline = [' ' '\t' '\012' '\r']+
 
 let escape = '\\' _
 let hex_escape = '\\' ['x' 'X'] hexdigit+
 let oct_escape = '\\' octdigit octdigit? octdigit?
 
-let string_elem = [^ '"'] | "\\\""
+let string_elem = [^ '"' '\\' '\n'] | ('\\' _)
 let string = '"' string_elem* '"'
 
-let char_elem = [^ '\''] | "\\'"
+let char_elem = [^ '\'' '\\' '\n'] | ('\\' _)
 let char = "'" char_elem* "'"
 
 rule token s = parse
@@ -167,9 +168,14 @@ rule token s = parse
 and comment s = parse
 | "*/"          { add_whitespace s lexbuf }
 | eof           { () }
-| ( [^'*'] | '*' [^'/'] )+
-                { add_whitespace s lexbuf; comment s lexbuf }
 | _             { add_whitespace s lexbuf; comment s lexbuf }
+
+(* Does not record whitespace. Used in skip_to_directive. *)
+and comment' = parse
+| "*/"          { () }
+| eof           { () }
+| '\n'          { next_line lexbuf; comment' lexbuf }
+| _             { comment' lexbuf }
 
 and one_line_comment s = parse
 | '\n'          { add_whitespace s lexbuf }
@@ -214,14 +220,11 @@ and include_file = parse
                 { SysInclude }
 | _             { raise Error }
 
-and skip_line = parse
-| '\n'          { next_line lexbuf }
-| [^'\n']+      { skip_line lexbuf }
-| eof           { () }
-
-(* invoke only at beginning of line *)
-and skip_to_directive = parse
-| '#'           { true }
-| '\n'          { next_line lexbuf; skip_to_directive lexbuf }
-| _             { skip_line lexbuf; skip_to_directive lexbuf }
+and skip_to_directive ok = parse
+| '#'           { ok || skip_to_directive false lexbuf }
+| blank_no_newline
+                { skip_to_directive ok lexbuf }
+| '\n'          { next_line lexbuf; skip_to_directive true lexbuf }
+| "/*"          { comment' lexbuf; skip_to_directive ok lexbuf }
+| _             { skip_to_directive false lexbuf }
 | eof           { false }
