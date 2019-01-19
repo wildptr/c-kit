@@ -1,0 +1,7 @@
+#define X
+#ifdef X
+good
+#else
+bad
+#endif
+done
