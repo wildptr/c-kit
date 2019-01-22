@@ -144,8 +144,5 @@ let convert_token kind text =
     P.Dot
   | Hash ->
     P.Hash
-
-  (* these tokens are exclusive to the preprocessor *)
-  | Unknown
-  | HashHash ->
-    failwith "convert_token"
+  | _ ->
+    P.Unknown text

@@ -54,6 +54,7 @@ type pptoken =
   | Hash
   | HashHash
   | Unknown
+  | Directive
 
 (*| DEFINE
   | ELSE

@@ -1,8 +1,7 @@
 module P = Parser.Incremental
 
-let () =
-  let filename = "<stdin>" in
-  let supplier = Preproc.make_supplier stdin in
+let parse_c_file ic filename =
+  let supplier = Preproc.make_supplier ic filename in
   let init_pos =
     Lexing.{
       pos_fname = filename;
@@ -12,5 +11,9 @@ let () =
     }
   in
   let init_checkpoint = P.translation_unit init_pos in
-  let ast = Parser.MenhirInterpreter.loop supplier init_checkpoint in
-  List.iter (Format.printf "%a@." AST.pp_extern_decl) ast
+  Parser.MenhirInterpreter.loop supplier init_checkpoint
+
+let () =
+  let ast = parse_c_file stdin "<stdin>" in
+  let prog = Check_AST.check_ast ast in
+  prog |> List.iter (Format.printf "%a@." Program.pp_extern_decl)

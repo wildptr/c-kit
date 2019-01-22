@@ -1,157 +1,87 @@
-type lit =
-  | IntLit of string
-  | FloatLit of string
-  | CharLit of string
-  | StringLit of string
+open Program
+
+type spec_qual =
+  | S_Void
+  | S_Char
+  | S_Bool
+  | S_Short
+  | S_Int
+  | S_Long
+  | S_Float
+  | S_Double
+  | S_Signed
+  | S_Unsigned
+  | S_Const
+  | S_Volatile
+  | S_Typedef
+  | S_Extern
+  | S_Static
 [@@deriving show { with_path = false }]
 
-type unary_op =
-  | Dot of string
-  | Arrow of string
-  | PostInc
-  | PostDec
-  | PreInc
-  | PreDec
-  | Addr
-  | Deref
-  | Plus
-  | Minus
-  | Not
-  | LogNot
-  | SizeOf
-[@@deriving show { with_path = false }]
-
-type binary_op =
-  | Index
-  | Mul
-  | Div
-  | Mod
-  | Add
-  | Sub
-  | LShift
-  | RShift
-  | Lt
-  | Gt
-  | LtEq
-  | GtEq
-  | Eq
-  | NotEq
-  | And
-  | Xor
-  | Or
-  | LogAnd
-  | LogOr
-  | Assign
-  | MulAssign
-  | DivAssign
-  | ModAssign
-  | AddAssign
-  | SubAssign
-  | LShiftAssign
-  | RShiftAssign
-  | AndAssign
-  | XorAssign
-  | OrAssign
-  | Seq
-[@@deriving show { with_path = false }]
-
-type type_spec =
-  | Void
-  | Char
-  | Bool
-  | Short
-  | Int
-  | Long
-  | Float
-  | Double
-  | Signed
-  | Unsigned
-[@@deriving show { with_path = false }]
-
-type type_qual = Const | Volatile [@@deriving show { with_path = false }]
-
-type type_spec_qual =
-  | TypeSpec of type_spec
-  | TypeQual of type_qual
-[@@deriving show { with_path = false }]
-
-type sc_spec =
-  | Typedef
-  | Extern
-  | Static
-[@@deriving show { with_path = false }]
-
-type decl_spec =
-  | DeclStorageClass of sc_spec
-  | DeclTypeSpec of type_spec
-  | DeclTypeQual of type_qual
-[@@deriving show { with_path = false }]
-
-type expr =
-  | IdentExpr of string
-  | LitExpr of lit
-  | CallExpr of expr * expr list
-  | UnaryExpr of unary_op * expr
-  | BinaryExpr of binary_op * expr * expr
-  | CondExpr of expr * expr * expr
-  | SizeOfExpr of typ
-  | CastExpr of typ * expr
+type s_expr =
+  | S_IdentExpr of string
+  | S_LitExpr of lit
+  | S_CallExpr of s_expr * s_expr list
+  | S_UnaryExpr of unary_op * s_expr
+  | S_BinaryExpr of binary_op * s_expr * s_expr
+  | S_CondExpr of s_expr * s_expr * s_expr
+  | S_SizeOfExpr of s_typ
+  | S_CastExpr of s_typ * s_expr
 
 and declarator =
   | IdentDeclarator of string
-  | ArrayDeclarator of declarator * expr
+  | ArrayDeclarator of declarator * s_expr
   | FuncDeclarator of declarator * parameter_decl list
   | OldFuncDeclarator of declarator * string list
-  | PtrDeclarator of type_qual list * declarator
-
-and abstract_declarator =
-  | NullAbsDeclarator
-  | ArrayAbsDeclarator of abstract_declarator * expr
-  | FuncAbsDeclarator of abstract_declarator * parameter_decl list
-  | PtrAbsDeclarator of type_qual list * abstract_declarator
+  | PtrDeclarator of spec_qual list * declarator
 
 and parameter_decl =
-  | NamedParamDecl of decl_spec list * declarator
-  | AbsParamDecl of decl_spec list * abstract_declarator
+  | NamedParamDecl of spec_qual list * declarator
+  | AbsParamDecl of spec_qual list * (*abstract*)declarator
 
-and typ = type_spec_qual list * abstract_declarator
+and s_typ = spec_qual list * (*abstract*)declarator
 
 [@@deriving show { with_path = false }]
 
-type init_declarator = declarator * expr option
+type init_declarator = declarator * s_expr option
 [@@deriving show { with_path = false }]
 
-type decl = decl_spec list * init_declarator list
+type s_decl = spec_qual list * init_declarator list
 [@@deriving show { with_path = false }]
 
-type stmt =
-  | NullStmt
-  | LabelStmt of string * stmt
-  | CaseLabelStmt of expr * stmt
-  | DefaultLabelStmt of stmt
-  | CompStmt of block_item list
-  | ExprStmt of expr
-  | IfStmt of expr * stmt * stmt
-  | SwitchStmt of expr * stmt
-  | WhileStmt of expr * stmt
-  | DoWhileStmt of stmt * expr
-  | ForStmt1 of expr option * expr option * expr option * stmt
-  | ForStmt2 of decl * expr option * expr option * stmt
-  | GotoStmt of string
-  | ContinueStmt
-  | BreakStmt
-  | ReturnStmt of expr option
+type s_label =
+  | S_OrdinaryLabel of string
+  | S_CaseLabel of s_expr
+  | S_DefaultLabel
+[@@deriving show { with_path = false }]
+
+type s_stmt =
+  | S_NullStmt
+  | S_LabelStmt of s_label * s_stmt
+  | S_CompStmt of block_item list
+  | S_ExprStmt of s_expr
+  | S_IfStmt of s_expr * s_stmt
+  | S_IfElseStmt of s_expr * s_stmt * s_stmt
+  | S_SwitchStmt of s_expr * s_stmt
+  | S_WhileStmt of s_expr * s_stmt
+  | S_DoWhileStmt of s_stmt * s_expr
+  | S_ForStmt1 of s_expr option * s_expr option * s_expr option * s_stmt
+  | S_ForStmt2 of s_decl * s_expr option * s_expr option * s_stmt
+  | S_GotoStmt of string
+  | S_ContinueStmt
+  | S_BreakStmt
+  | S_ReturnStmt of s_expr option
 
 and block_item =
-  | DeclItem of decl
-  | StmtItem of stmt
+  | DeclItem of s_decl
+  | StmtItem of s_stmt
 
 [@@deriving show { with_path = false }]
 
-type func_def = decl_spec list * declarator * decl list * block_item list
+type s_func_def = spec_qual list * declarator * s_decl list * block_item list
 [@@deriving show { with_path = false }]
 
-type extern_decl =
-  | FuncDef of func_def
-  | Decl of decl
+type s_extern_decl =
+  | S_FuncDef of s_func_def
+  | S_Decl of s_decl
 [@@deriving show { with_path = false }]

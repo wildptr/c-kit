@@ -1,4 +1,3 @@
-open ExtLib
 open PP_Token
 open Token_Conv
 
@@ -852,6 +851,6 @@ let make_supplier ic filename =
     let token' = convert_token token.kind token.text in
     let line = start_pos.pos_lnum in
     let col = start_pos.pos_cnum - start_pos.pos_bol in
-    Format.printf "%d:%d: %a ‘%s’\n"
-      line col pp_pptoken token.kind token.text;
+    (* Format.printf "%d:%d: %a ‘%s’\n"
+      line col pp_pptoken token.kind token.text; *)
     token', start_pos, end_pos
