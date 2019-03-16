@@ -11,10 +11,13 @@ MENHIRFLAGS     := --table --explain
 
 OCAMLBUILD      := ocamlbuild -use-ocamlfind -use-menhir -menhir "$(MENHIR) $(MENHIRFLAGS)" -package extlib -package menhirLib -package ppx_deriving.std
 
-all: cpp.native parse.native
+all: parse.native parser.cma
 
 %.native: FORCE
 	$(OCAMLBUILD) $*.native
+
+%.cma: FORCE
+	$(OCAMLBUILD) $*.cma
 
 clean:
 	rm -f *~ .*~

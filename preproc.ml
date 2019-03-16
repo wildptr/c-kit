@@ -1,5 +1,5 @@
-open PP_Token
-open Token_Conv
+open Token
+open AST_Types
 
 module H =
   Hashtbl.Make(struct
@@ -8,15 +8,15 @@ module H =
     let hash = Hashtbl.hash
   end)
 
-type token = {
-  kind : pptoken;
+type token' = {
+  kind : token;
   text : string;
   pos : Lexing.position;
   ws : string (* preceding whitespace *)
 }
 
 type replace_token =
-  | Verbatim of token
+  | Verbatim of token'
   | Param of int
   | Stringify of string * int
   | Concat of replace_token * replace_token
@@ -59,8 +59,8 @@ let init_state input_chan filename =
     [
       "__FILE__", ObjLike [Magic_FILE];
       "__LINE__", ObjLike [Magic_LINE];
-      "__STDC__", ObjLike [r IntLit "1"];
-      "__STDC_VERSION__", ObjLike [r IntLit "199901L"];
+      "__STDC__", ObjLike [r (TInt ("1", true, Size_Int)) "1"];
+      "__STDC_VERSION__", ObjLike [r (TInt ("199901", true, Size_Long)) "199901L"];
     ] |> List.to_seq |> H.of_seq
   in
   { ws_buf = Buffer.create 1024;
@@ -115,6 +115,9 @@ exception Error of Lexing.position * string
 
 let error pos s = raise (Error (pos, s))
 
+let report_error pos msg =
+  Format.eprintf "%a: %s@." pp_pos pos msg
+
 let unexpected_token pos = error pos "unexpected token"
 
 let pp_token_list f l =
@@ -125,10 +128,10 @@ let pp_token_list f l =
   end
 
 (* token stream *)
-type parser_ = {
-  next : unit -> token;
-  mutable tok : token;
-  mutable tokq : token list
+type parser = {
+  next : unit -> token';
+  mutable tok : token';
+  mutable tokq : token' list
 }
 
 let skip p =
@@ -154,7 +157,7 @@ let expect p text =
 let expect_ident p =
   let t = getsym p in
   match t.kind with
-  | Ident _ -> t.text
+  | PreIdent _ -> t.text
   | _ -> error t.pos "identifier expected"
 
 let expect_eof p =
@@ -233,30 +236,30 @@ let stringify pos ws l =
       end;
       Buffer.contents buf
   in
-  { kind = StringLit; text = quote s; pos; ws }
+  { kind = TString s; text = quote s; pos; ws }
 
 let get_noexp_list = function
-  | { kind = Ident l; _ } -> l
+  | { kind = PreIdent l; _ } -> l
   | _ -> []
 
 let concat_token pos t1 t2 =
   let text = t1.text ^ t2.text in
   let kind =
     match parse_token pos text with
-    | Ident _ -> Ident (get_noexp_list t1 @ get_noexp_list t2)
+    | PreIdent _ -> PreIdent (get_noexp_list t1 @ get_noexp_list t2)
     | k -> k
   in
   { kind; text; pos; ws = "" }
 
 let mark_token macro_name = function
-  | { kind = Ident l; _ } as t ->
-    { t with kind = Ident (macro_name :: l) }
+  | { kind = PreIdent l; _ } as t ->
+    { t with kind = PreIdent (macro_name :: l) }
   | t -> t
 
 let rec subst_token (macro_name, noexp, pos, ws as token_info)
     arg_tab verbatim = function
-  | Verbatim ({ kind = Ident _; _ } as t) ->
-    [{ t with kind = Ident (macro_name :: noexp); pos }]
+  | Verbatim ({ kind = PreIdent _; _ } as t) ->
+    [{ t with kind = PreIdent (macro_name :: noexp); pos }]
   | Verbatim t ->
     [{ t with pos }]
   | Param i ->
@@ -279,9 +282,11 @@ let rec subst_token (macro_name, noexp, pos, ws as token_info)
         l1 @ concat_token pos t1 t2 :: l2
     end
   | Magic_FILE ->
-    [{ kind = StringLit; text = quote pos.pos_fname; pos; ws }]
+    let s = pos.pos_fname in
+    [{ kind = TString s; text = quote s; pos; ws }]
   | Magic_LINE ->
-    [{ kind = IntLit; text = string_of_int pos.pos_lnum; pos; ws }]
+    let s = string_of_int pos.pos_lnum in
+    [{ kind = TInt (s, true, Size_Int); text = s; pos; ws }]
 
 let rec find_include_file search_path filename =
   match search_path with
@@ -313,98 +318,68 @@ let pop_include st =
     st.input_chan <- ic;
     st.cond_stack <- cs
 
-let is_oct_digit = function
-  | '0'..'7' -> true
-  | _ -> false
-
-let is_digit = function
-  | '0'..'9' -> true
-  | _ -> false
-
-let digit_value = function
-  | '0'..'9' as c -> Char.code c - 48
-  | _ -> assert false
-
 let parse_int s =
   let n = String.length s in
-  let tmp = ref 0 in
+  let tmp = ref 0L in
   if s.[0] = '0' then begin
     (* octal *)
     let i = ref 1 in
-    while !i < n && is_oct_digit s.[!i] do
-      tmp := !tmp*8 + digit_value s.[!i];
+    while !i < n && Lexer.is_oct_digit s.[!i] do
+      tmp := Int64.add (Int64.shift_left !tmp 3)
+          (Int64.of_int (Lexer.digit_value s.[!i]));
       incr i
     done
   end else begin
     let i = ref 0 in
-    while !i < n && is_digit s.[!i] do
-      tmp := !tmp*10 + digit_value s.[!i];
+    while !i < n && Lexer.is_digit s.[!i] do
+      tmp := Int64.add (Int64.mul !tmp 10L)
+        (Int64.of_int (Lexer.digit_value s.[!i]));
       incr i
     done
   end;
   !tmp
 
-let parse_escape_seq s i =
-  match s.[i] with
-  | 'n' -> '\n'
-  | 'r' -> '\r'
-  | 't' -> '\t'
-  | 'b' -> '\b'
-  | 'f' -> '\012'
-  | 'v' -> '\011'
-  | 'a' -> '\007'
-  | '0'..'7' ->
-    let n = String.length s in
-    let j = ref (i+1) in
-    let tmp = ref 0 in
-    while !j < n && is_oct_digit s.[!j] do
-      tmp := !tmp*8 + digit_value s.[!j];
-      incr j
-    done;
-    Char.chr !tmp
-  | _ -> assert false
-
 let parse_char s =
   let c =
     match s.[1] with
-    | '\\' -> parse_escape_seq s 2
+    | '\\' -> Lexer.parse_escape_seq s (ref 2)
     | c -> c
   in
   Char.code c
 
 let is_prefix_op = function
-  | Minus | Tilde | Bang -> true
+  | TMinus | Tilde | Bang -> true
   | _ -> false
 
 let eval_prefix_op op v =
   match op with
-  | Minus -> -v
-  | Tilde -> lnot v
-  | Bang -> if v=0 then 1 else 0
+  | TMinus -> Int64.neg v
+  | Tilde -> Int64.lognot v
+  | Bang -> if v=0L then 1L else 0L
   | _ -> assert false
 
 let eval_binary_op op v1 v2 =
   match op.kind with
-  | Star -> v1*v2
+  | Star -> Int64.mul v1 v2
   | Slash ->
-    if v2 = 0 then error op.pos "division by 0" else v1/v2
+    if v2 = 0L then error op.pos "division by 0" else Int64.div v1 v2
   | Percent ->
-    if v2 = 0 then error op.pos "division by 0" else v1 mod v2
-  | Plus -> v1+v2
-  | Minus -> v1-v2
-  | LtLt -> v1 lsl v2
-  | GtGt -> v2 lsr v2
-  | Lt -> if v1<v2 then 1 else 0
-  | Gt -> if v1>v2 then 1 else 0
-  | LtEq -> if v1 <= v2 then 1 else 0
-  | GtEq -> if v1 >= v2 then 1 else 0
-  | EqEq -> if v1 = v2 then 1 else 0
-  | BangEq -> if v1 <> v2 then 1 else 0
-  | And -> v1 land v2
-  | Circ -> v1 lxor v2
-  | Pipe -> v1 lor v2
-  | AndAnd -> if v1<>0 && v2<>0 then 1 else 0
-  | PipePipe -> if v1<>0 || v2<>0 then 1 else 0
+    if v2 = 0L then error op.pos "division by 0" else Int64.rem v1 v2
+  | TPlus -> Int64.add v1 v2
+  | TMinus -> Int64.sub v1 v2
+  | LtLt -> Int64.shift_left v1 (Int64.to_int v2)
+  | GtGt -> Int64.shift_right v1 (Int64.to_int v2)
+  | Lt -> if v1<v2 then 1L else 0L
+  | Gt -> if v1>v2 then 1L else 0L
+  | LtEq -> if v1 <= v2 then 1L else 0L
+  | GtEq -> if v1 >= v2 then 1L else 0L
+  | EqEq -> if v1 = v2 then 1L else 0L
+  | BangEq -> if v1 <> v2 then 1L else 0L
+  | TAnd -> Int64.logand v1 v2
+  | Circ -> Int64.logxor v1 v2
+  | Pipe -> Int64.logor v1 v2
+  | AndAnd -> if v1<>0L && v2<>0L then 1L else 0L
+  | PipePipe -> if v1<>0L || v2<>0L then 1L else 0L
   | _ -> assert false
 
 let parse_binary_expr parse_sub_expr op_test p =
@@ -420,10 +395,10 @@ let parse_binary_expr parse_sub_expr op_test p =
 
 let rec parse_atom p =
   match getsym p with
-  | { kind = IntLit; text; _ } ->
+  | { kind = TInt _; text; _ } ->
     parse_int text
-  | { kind = CharLit; text; _ } ->
-    parse_char text
+  | { kind = TChar _; text; _ } ->
+    Int64.of_int (parse_char text)
   | { kind = LParen; _ } ->
     let v = parse_cond_expr p in
     expect p ")";
@@ -442,14 +417,14 @@ and parse_prefix_expr p =
 and parse_mult_expr p = parse_binary_expr parse_prefix_expr
     (function Star | Slash | Percent -> true | _ -> false) p
 and parse_add_expr p = parse_binary_expr parse_mult_expr
-    (function Plus | Minus -> true | _ -> false) p
+    (function TPlus | TMinus -> true | _ -> false) p
 and parse_shift_expr p = parse_binary_expr parse_add_expr
     (function LtLt | GtGt -> true | _ -> false) p
 and parse_rel_expr p = parse_binary_expr parse_shift_expr
     (function Lt | Gt | LtEq | GtEq -> true | _ -> false) p
 and parse_eq_expr p = parse_binary_expr parse_rel_expr
     (function EqEq | BangEq -> true | _ -> false) p
-and parse_and_expr p = parse_binary_expr parse_eq_expr ((=) And) p
+and parse_and_expr p = parse_binary_expr parse_eq_expr ((=) TAnd) p
 and parse_xor_expr p = parse_binary_expr parse_and_expr ((=) Circ) p
 and parse_or_expr p = parse_binary_expr parse_xor_expr ((=) Pipe) p
 and parse_log_and_expr p = parse_binary_expr parse_or_expr ((=) AndAnd) p
@@ -462,7 +437,7 @@ and parse_cond_expr p =
     let v2 = parse_cond_expr p in
     expect p ":";
     let v3 = parse_cond_expr p in
-    if v1 <> 0 then v2 else v3
+    if v1 <> 0L then v2 else v3
   end else v1
 
 let parse_cond p =
@@ -488,7 +463,7 @@ let make_parser next =
 let rec parse_macro_body param_alist p =
   let parse_simple () =
     match getsym p with
-    | { kind = Ident _; text = name; _ } as t ->
+    | { kind = PreIdent _; text = name; _ } as t ->
       begin match List.assoc name param_alist with
         | i -> Param i
         | exception Not_found -> Verbatim t
@@ -497,7 +472,7 @@ let rec parse_macro_body param_alist p =
       (* According to the standard, each '#' in a function-like macro must be
          followed by a parameter. Here we don't enforce this constraint. *)
       begin match p.tok.kind with
-        | Ident _ ->
+        | PreIdent _ ->
           let name = p.tok.text in
           begin match List.assoc name param_alist with
             | i -> skip p; Stringify (ws, i)
@@ -526,13 +501,13 @@ let rec parse_macro_body param_alist p =
 let rec getsym_expand macro_tab p =
   let t = getsym p in
   match t.kind with
-  | Ident noexp when subject_to_expansion macro_tab p t.text noexp ->
+  | PreIdent noexp when subject_to_expansion macro_tab p t.text noexp ->
     expand_ident macro_tab p t;
     getsym_expand macro_tab p
   | _ -> t
 
 and expand_ident macro_tab p t : unit =
-  let noexp = match t.kind with Ident l -> l | _ -> assert false in
+  let noexp = match t.kind with PreIdent l -> l | _ -> assert false in
   let s = t.text in
   let expand arg_tab body =
     let l' =
@@ -604,13 +579,13 @@ let make_cond_expander macro_tab p =
           let name = expect_ident p in
           let () = expect p ")" in
           name
-        | { kind = Ident _; text; _ } -> text
-        | { pos; _ } -> error pos "syntax error"
+        | { kind = PreIdent _; text; _ } -> text
+        | { pos; _ } -> error pos "identifier expected after ‘defined’"
       in
       let text = if H.mem macro_tab name then "1" else "0" in
-      { t with kind = IntLit; text }
-    | { kind = Ident _ } as t ->
-      { t with kind = IntLit; text = "0" }
+      { t with kind = TInt (text, true, Size_Int); text }
+    | { kind = PreIdent _ } as t ->
+      { t with kind = TInt ("0", true, Size_Int); text = "0" }
     | t -> t
   end
 
@@ -642,7 +617,7 @@ let handle_elif st p =
   | (true, After) :: tl -> st.cond_stack <- (false, After) :: tl
   | (false, After) :: _ -> ()
   | (_, Before) :: tl ->
-    let active = parse_cond (make_cond_expander st.macro_tab p) <> 0 in
+    let active = parse_cond (make_cond_expander st.macro_tab p) <> 0L in
     st.cond_stack <- (active, if active then After else Before) :: tl
 
 let handle_define st p =
@@ -656,12 +631,12 @@ let handle_define st p =
       let param_alist, arity, is_vararg =
         match getsym p with
         | { kind = RParen; _ } -> [], 0, false
-        | { kind = Ident _; text; _ } ->
+        | { kind = PreIdent _; text; _ } ->
           let rec loop m i =
             match getsym p with
             | { kind = Comma; _ } ->
               begin match getsym p with
-                | { kind = Ident _; text; _ } ->
+                | { kind = PreIdent _; text; _ } ->
                   loop ((text, i) :: m) (i+1)
                 | { kind = Ellipsis; _ } ->
                   expect p ")";
@@ -773,7 +748,14 @@ let handle_directive st (pos : Lexing.position) dir =
       | "include" -> handle_include st p lexbuf
       | "if" ->
         skip p;
-        let active = parse_cond (make_cond_expander st.macro_tab p) <> 0 in
+        let active =
+          try
+            parse_cond (make_cond_expander st.macro_tab p) <> 0L
+          with Error (pos, msg) ->
+            (* when the condition is malformed, consider it false *)
+            report_error pos msg;
+            false
+        in
         st.cond_stack <- (active, if active then After else Before) :: st.cond_stack
       | "warning" -> () (* TODO *)
       | "error" -> () (* TODO *)
@@ -798,9 +780,7 @@ let make_preproc_parser st =
     let t =
       match st.cond_stack with
       | [] | (true, _) :: _ ->
-        let t = lex st.ws_buf st.lexbuf in
-        if String.length t.text >= 256 then Printf.eprintf "WARNING: very long token %s ‘%s’\n" (show_pptoken t.kind) t.text;
-        t
+        lex st.ws_buf st.lexbuf
       | (false, _) :: _ ->
 (*      let lb = st.lexbuf in
         Format.eprintf "about to skip, current position: %a@." pp_pos lb.lex_curr_p;
@@ -822,7 +802,7 @@ let make_preproc_parser st =
         try
           handle_directive st dir_pos dir
         with Error (pos, msg) ->
-          Format.eprintf "%a: %s@." pp_pos pos msg;
+          report_error pos msg
       end;
       next ()
     | EOF ->
@@ -849,8 +829,8 @@ let make_supplier ic filename =
         pos_cnum = start_pos.pos_cnum + String.length token.text }
     in
     let token' = convert_token token.kind token.text in
-    let line = start_pos.pos_lnum in
-    let col = start_pos.pos_cnum - start_pos.pos_bol in
+    (* let line = start_pos.pos_lnum in
+    let col = start_pos.pos_cnum - start_pos.pos_bol in *)
     (* Format.printf "%d:%d: %a ‘%s’\n"
       line col pp_pptoken token.kind token.text; *)
     token', start_pos, end_pos

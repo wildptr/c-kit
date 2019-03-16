@@ -1,6 +1,7 @@
 {
 open Lexing
-open PP_Token
+open Token
+open AST_Types
 
 let next_line lexbuf =
   let p = lexbuf.lex_curr_p in
@@ -47,6 +48,64 @@ let add_whitespace b lexbuf =
       pos_lnum = pos.lnum;
       pos_bol = pos.bol }
 
+exception Invalid_Escape
+
+let is_oct_digit = function
+  | '0'..'7' -> true
+  | _ -> false
+
+let is_digit = function
+  | '0'..'9' -> true
+  | _ -> false
+
+let digit_value = function
+  | '0'..'9' as c -> Char.code c - 48
+  | _ -> assert false
+
+let parse_escape_seq s i =
+  match s.[!i] with
+  | 'n' -> incr i; '\n'
+  | 'r' -> incr i; '\r'
+  | 't' -> incr i; '\t'
+  | 'b' -> incr i; '\b'
+  | 'f' -> incr i; '\012'
+  | 'v' -> incr i; '\011'
+  | 'a' -> incr i; '\007'
+  | '0'..'7' as c ->
+    (* an octal escape sequence is at most 3 characters long *)
+    let lim = min (String.length s) (!i+3) in
+    let tmp = ref (digit_value c) in
+    incr i;
+    while !i < lim && is_oct_digit s.[!i] do
+      tmp := !tmp*8 + digit_value (s.[!i]);
+      incr i
+    done;
+    Char.chr !tmp
+  | _ -> raise Invalid_Escape
+
+let parse_string s =
+  let n = String.length s in
+  let b = Buffer.create n in
+  let i = ref 0 in
+  while !i < n do
+    match s.[!i] with
+    | '\\' ->
+      incr i;
+      begin
+        try
+          let c = parse_escape_seq s i in
+          Buffer.add_char b c
+        with Invalid_Escape ->
+          Buffer.add_char b '\\';
+          Buffer.add_char b s.[!i];
+          incr i
+      end
+    | c ->
+      incr i;
+      Buffer.add_char b c
+  done;
+  Buffer.contents b
+
 exception Error
 
 }
@@ -57,32 +116,33 @@ let hexdigit = ['0'-'9' 'a'-'f' 'A'-'F']
 let letter = ['a'- 'z' 'A'-'Z']
 
 
-let usuffix = ['u' 'U']
-let lsuffix = "l"|"L"|"ll"|"LL"
-let intsuffix = lsuffix | usuffix | usuffix lsuffix | lsuffix usuffix
+let u_suffix = ['u' 'U']
+let l_suffix = "l"|"L"
+let ll_suffix = "ll"|"LL"
 
+let f_suffix = ['f' 'F']
 
 let hexprefix = '0' ['x' 'X']
 
-let intnum = decdigit+ intsuffix?
-let octnum = '0' octdigit+ intsuffix?
-let hexnum = hexprefix hexdigit+ intsuffix?
+let decnum = decdigit+
+let octnum = '0' octdigit+
+let hexnum = hexprefix hexdigit+
+let num = decnum | octnum | hexnum
 
 let exponent = ['e' 'E']['+' '-']? decdigit+
 let fraction  = '.' decdigit+
-let decfloat = (intnum? fraction)
-       |(intnum exponent)
-       |(intnum? fraction exponent)
-       | (intnum '.')
-              | (intnum '.' exponent)
+let decfloat = (decnum? fraction)
+       |(decnum exponent)
+       |(decnum? fraction exponent)
+       | (decnum '.')
+              | (decnum '.' exponent)
 
 let hexfraction = hexdigit* '.' hexdigit+ | hexdigit+ '.'
 let binexponent = ['p' 'P'] ['+' '-']? decdigit+
 let hexfloat = hexprefix hexfraction binexponent
              | hexprefix hexdigit+   binexponent
 
-let floatsuffix = ['f' 'F' 'l' 'L']
-let floatnum = (decfloat | hexfloat) floatsuffix?
+let floatnum = (decfloat | hexfloat)
 
 let ident = (letter|'_'|'$')(letter|decdigit|'_'|'$')*
 let blank = ([' ' '\t' '\012' '\r' '\n'] | "\\\n" )+
@@ -93,10 +153,7 @@ let hex_escape = '\\' ['x' 'X'] hexdigit+
 let oct_escape = '\\' octdigit octdigit? octdigit?
 
 let string_elem = [^ '"' '\\' '\n'] | ('\\' _)
-let string = '"' string_elem* '"'
-
 let char_elem = [^ '\'' '\\' '\n'] | ('\\' _)
-let char = "'" char_elem* "'"
 
 rule token s = parse
 | "/*"          { add_whitespace s lexbuf;
@@ -107,12 +164,30 @@ rule token s = parse
                   token s lexbuf }
 | blank         { add_whitespace s lexbuf;
                   token s lexbuf }
-| floatnum      { FloatLit }
-| hexnum        { IntLit }
-| octnum        { IntLit }
-| intnum        { IntLit }
-| string        { StringLit }
-| char          { CharLit }
+| floatnum as s { TFloat (s, Size_Double) }
+| (floatnum as s) f_suffix
+                { TFloat (s, Size_Float) }
+| (floatnum as s) l_suffix
+                { TFloat (s, Size_Long_Double) }
+| num as s      { TInt (s, true, Size_Int) }
+| (num as s) u_suffix
+                { TInt (s, false, Size_Int) }
+| (num as s) l_suffix
+                { TInt (s, true, Size_Long) }
+| (num as s) u_suffix l_suffix
+                { TInt (s, false, Size_Long) }
+| (num as s) l_suffix u_suffix
+                { TInt (s, false, Size_Long) }
+| (num as s) ll_suffix
+                { TInt (s, true, Size_Long_Long) }
+| (num as s) u_suffix ll_suffix
+                { TInt (s, false, Size_Long_Long) }
+| (num as s) ll_suffix u_suffix
+                { TInt (s, false, Size_Long_Long) }
+| '"' (string_elem* as s) '"'
+                { TString (parse_string s) }
+| "'" (char_elem* as s) "'"
+                { TChar (parse_string s) }
 | "..."         { Ellipsis }
 | "+="          { PlusEq }
 | "-="          { MinusEq }
@@ -136,15 +211,15 @@ rule token s = parse
 | "++"          { PlusPlus }
 | "--"          { MinusMinus }
 | "->"          { Arrow }
-| '+'           { Plus }
-| '-'           { Minus }
+| '+'           { TPlus }
+| '-'           { TMinus }
 | '*'           { Star }
 | '/'           { Slash }
 | '%'           { Percent }
 | '!'           { Bang }
 | "&&"          { AndAnd }
 | "||"          { PipePipe }
-| '&'           { And }
+| '&'           { TAnd }
 | '|'           { Pipe }
 | '^'           { Circ }
 | '?'           { Quest }
@@ -159,7 +234,7 @@ rule token s = parse
 | ';'           { Semi }
 | ','           { Comma }
 | '.'           { Dot }
-| ident         { Ident [] }
+| ident         { PreIdent [] }
 | eof           { EOF }
 | "##"          { HashHash }
 | '#'           { Hash }
