@@ -1,12 +1,12 @@
 module P = Parser
 
 let config =
-  Program.{
+  AST.{
     short_size = 2;
     int_size = 4;
     long_size = 4;
     long_long_size = 8;
-    word_size = AST_Types.Size_Long
+    word_size = AST.Size_Long
   }
 
 let parse_c_file ic filename =
@@ -18,13 +18,13 @@ let parse_c_file ic filename =
       | P.Error -> "error"
       | Warning -> "warning"
     in
-    Format.eprintf "%a: %s: %s@." Program.pp_loc loc msgtype_name msg
+    Format.eprintf "%a: %s: %s@." AST.pp_loc loc msgtype_name msg
   end;
   result
 
 let () =
   try
     let tu = parse_c_file stdin "<stdin>" in
-    tu |> List.iter (Format.printf "%a@." Program.pp_extern_decl)
+    tu |> List.iter (Format.printf "%a@." AST.pp_extern_decl)
   with P.Syntax_Error pos ->
     Format.eprintf "%a: syntax error@." Preproc.pp_pos pos

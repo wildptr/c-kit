@@ -3,9 +3,8 @@
    representation of the program. *)
 
 open Token
-open Program
+open AST
 open ExtLib
-open AST_Types
 
 module H =
   Hashtbl.Make(struct
@@ -121,14 +120,14 @@ let print_message (loc, msgtype, msg) =
     | Error -> "error"
     | Warning -> "warning"
   in
-  Format.eprintf "%a: %s: %s@." Program.pp_loc loc msgtype_name msg
+  Format.eprintf "%a: %s: %s@." pp_loc loc msgtype_name msg
 
 type parser = {
   supplier : unit -> Token.token * Lexing.position * Lexing.position;
   mutable tok : token;
   mutable pos : Lexing.position; (* start of current lookahead token *)
   mutable last_end : Lexing.position; (* end of last consumed token *)
-  mutable pos_end : Lexing.position;
+  mutable pos_end : Lexing.position; (* end of current lookahead token *)
   mutable tokq : (token * Lexing.position * Lexing.position * Lexing.position) list;
   env : env;
   messages : (loc * msgtype * string) Stack.t;
@@ -419,12 +418,13 @@ type spec = {
   mutable volatile : bool
 }
 
-type 'a declarator =
+type 'a declarator' =
   | D_Base of 'a
   | D_Ptr of 'a declarator * cv
   | D_Array of 'a declarator * expr option
   | D_Func of 'a declarator * string option pdecl list
   | D_Old_Func of 'a declarator * string list
+and 'a declarator = 'a declarator' * loc
 
 let make_type spec =
   (* TODO: validate *)
@@ -465,11 +465,12 @@ let make_type spec =
 let make_cv spec =
   (spec.const, spec.volatile)
 
+(* TODO: propagate location information *)
 let make_decl' spec_storage spec_cv spec_typ
-    (d : 'a declarator) p =
+    ((d, _loc) : 'a declarator) p =
   let rec loop qtyp = function
     | D_Base name -> (qtyp, name)
-    | D_Array (d, e_opt) ->
+    | D_Array ((d, _), e_opt) ->
       let (typ, cv), name = loop qtyp d in
       begin match e_opt with
         | Some e ->
@@ -483,7 +484,7 @@ let make_decl' spec_storage spec_cv spec_typ
         | None ->
           ((Incomplete_Array (typ, cv), no_cv), name)
       end
-    | D_Func (d, l) ->
+    | D_Func ((d, _), l) ->
       let (typ, _), name = loop qtyp d in
       let l' = List.map (fun d -> { d with d_name = () }) l in
       let func_type =
@@ -491,14 +492,14 @@ let make_decl' spec_storage spec_cv spec_typ
           param_types_opt = Some l' }
       in
       ((Func func_type, no_cv), name)
-    | D_Old_Func (d, _) ->
+    | D_Old_Func ((d, _), _) ->
       let (typ, _), name = loop qtyp d in
       let func_type =
         { return_type = typ;
           param_types_opt = None }
       in
       ((Func func_type, no_cv), name)
-    | D_Ptr (d, cv) ->
+    | D_Ptr ((d, _), cv) ->
       let (typ, cv'), name = loop qtyp d in
       ((Ptr (typ, cv'), cv), name)
   in
@@ -512,18 +513,31 @@ let make_decl spec d p =
   make_decl' spec.storage (make_cv spec) (make_type spec) d p
 
 let rec make_named_declarator = function
-  | D_Base None ->
+  | (D_Base None, _loc) ->
     assert false
-  | D_Base (Some name) ->
-    D_Base name
-  | D_Ptr (d, cv) ->
-    D_Ptr (make_named_declarator d, cv)
-  | D_Array (d, e) ->
-    D_Array (make_named_declarator d, e)
-  | D_Func (d, l) ->
-    D_Func (make_named_declarator d, l)
-  | D_Old_Func (d, l) ->
-    D_Old_Func (make_named_declarator d, l)
+  | (D_Base (Some name), loc) ->
+    (D_Base name, loc)
+  | (D_Ptr (d, cv), loc) ->
+    (D_Ptr (make_named_declarator d, cv), loc)
+  | (D_Array (d, e), loc) ->
+    (D_Array (make_named_declarator d, e), loc)
+  | (D_Func (d, l), loc) ->
+    (D_Func (make_named_declarator d, l), loc)
+  | (D_Old_Func (d, l), loc) ->
+    (D_Old_Func (make_named_declarator d, l), loc)
+
+let rec make_named_declarator_opt = function
+  | (D_Base None, _loc) -> None
+  | (D_Base (Some name), loc) ->
+    (Some (D_Base name, loc))
+  | (D_Ptr (d, cv), loc) ->
+    Option.map (fun d' -> D_Ptr (d', cv), loc) (make_named_declarator_opt d)
+  | (D_Array (d, e), loc) ->
+    Option.map (fun d' -> D_Array (d', e), loc) (make_named_declarator_opt d)
+  | (D_Func (d, l), loc) ->
+    Option.map (fun d' -> D_Func (d', l), loc) (make_named_declarator_opt d)
+  | (D_Old_Func (d, l), loc) ->
+    Option.map (fun d' -> D_Old_Func (d', l), loc) (make_named_declarator_opt d)
 
 (* Parsing *)
 
@@ -1249,6 +1263,9 @@ let assign_op_of_token = function
   | _ ->
     None
 
+let start_pos (_, (startp, _endp)) = startp
+let end_pos (_, (_startp, endp)) = endp
+
 (* 6.5.1 *)
 let rec parse_primary_expr p =
   let pos = p.pos in
@@ -1572,7 +1589,7 @@ and parse_direct_declarator allow_anon p =
           | [{ d_type = Void; _ }] -> [] (* f(void) *)
           | _ -> l
         in
-        loop (D_Func (d1, l'))
+        loop (D_Func (d1, l'), (start_pos d1, p.last_end))
       end else begin
         match p.tok with
         | Ident name ->
@@ -1587,10 +1604,10 @@ and parse_direct_declarator allow_anon p =
           in
           let l = loop' [name] |> List.rev in
           expect p RParen;
-          loop (D_Old_Func (d1, l))
+          loop (D_Old_Func (d1, l), (start_pos d1, p.last_end))
         | RParen ->
           skip p;
-          loop (D_Old_Func (d1, []))
+          loop (D_Old_Func (d1, []), (start_pos d1, p.last_end))
         | _ ->
           syntax_error p.pos
       end
@@ -1599,61 +1616,60 @@ and parse_direct_declarator allow_anon p =
       begin match p.tok with
         | RBrack ->
           skip p;
-          loop (D_Array (d1, None))
+          loop (D_Array (d1, None), (start_pos d1, p.last_end))
         | _ ->
           let e = parse_constant_expr p in
           expect p RBrack;
-          loop (D_Array (d1, Some e))
+          loop (D_Array (d1, Some e), (start_pos d1, p.last_end))
       end
     | _ -> d1
   in
   let d =
     match p.tok with
     | Ident name ->
+      let startp = p.pos in
       skip p;
-      D_Base (Some name)
+      (D_Base (Some name), (startp, p.last_end))
     | LParen -> (* parse as function declarator: "(T...)" "()" *)
+      let startp = p.pos in
       let saved_token = save_token p in
       skip p;
       begin match p.tok with
       | Ident name as tok when not (starts_type p.env tok) ->
         let d = parse_declarator allow_anon p in
         expect p RParen;
-        d
+        (fst d, (startp, p.last_end))
       | _ ->
         ungetsym p saved_token;
-        if allow_anon then D_Base None else
+        if allow_anon then (D_Base None, (startp, startp)) else
           syntax_error p.pos
       end
     | _ ->
-      if allow_anon then D_Base None else
-        syntax_error p.pos
+      let pos = p.pos in
+      if allow_anon then (D_Base None, (pos, pos)) else
+        syntax_error pos
   in
   loop d
 
-and parse_declarator allow_anon p =
+and parse_declarator allow_anon p : string option declarator =
   match p.tok with
   | Star ->
+    let startp = p.pos in
     skip p;
-    let is_const = ref false
-    and is_volatile = ref false in
-    let rec loop () =
+    let rec loop (c, v) =
       (* TODO: report duplicate qualifiers *)
       match p.tok with
       | CONST ->
         skip p;
-        is_const := true;
-        loop ()
+        loop (true, v)
       | VOLATILE ->
         skip p;
-        is_volatile := true;
-        loop ()
-      | _ -> ()
+        loop (c, true)
+      | _ -> (c, v)
     in
-    loop ();
-    let cv = (!is_const, !is_volatile) in
+    let cv = loop (false, false) in
     let d = parse_declarator allow_anon p in
-    D_Ptr (d, cv)
+    (D_Ptr (d, cv), (startp, p.last_end))
   | _ ->
     parse_direct_declarator allow_anon p
 
@@ -1674,7 +1690,7 @@ and parse_init_declarator p =
 and try_parse_declarator p =
   match p.tok with
   | Ident _ | Star | LBrack | LParen -> parse_declarator true p
-  | _ -> D_Base None
+  | _ -> (D_Base None, (p.pos, p.pos))
 
 and parse_spec p =
   let errmsg = "invalid specifier" in
@@ -2136,8 +2152,29 @@ let parse_extern_decl p =
   if p.tok = Semi then (skip p; Decl []) else begin
     let dr1 = parse_init_declarator p in
     if p.tok = LBrace then begin
+      (* the init declarator should not contain an initializer *)
+      begin
+        match snd dr1 with
+        | None -> ()
+        | Some (Init_Expr { e_loc = loc; _ }) | Some (Init_List (_, loc)) ->
+          error p loc "no initializer allowed"
+      end;
+      (* and it should be a func. declarator *)
+      let param_decls : string option pdecl list =
+        match fst dr1 with
+        | (D_Func (_, p), _) -> p
+        | (_, loc) -> error p loc "function declarator expected"; []
+      in
       let d = make_decl' spec.storage cv typ (fst dr1) p in
+      (* take care of parameter declarations *)
+      push_scope p.env;
+      param_decls |> List.iter begin fun d ->
+        match make_named_decl_opt d with
+        | None -> ()
+        | Some d' -> declare p.env d'
+      end;
       let block = parse_block p in
+      pop_scope p.env;
       Func_Def (d, block)
     end else begin
       let rec loop acc =

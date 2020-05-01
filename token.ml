@@ -1,8 +1,8 @@
 type token =
   | EOF
   | PreIdent of string list (* no_expand_list *)
-  | TInt of string * bool * AST_Types.int_size
-  | TFloat of string * AST_Types.float_size
+  | TInt of string * bool * AST.int_size
+  | TFloat of string * AST.float_size
   | TChar of string
   | TString of string
   | Ellipsis
