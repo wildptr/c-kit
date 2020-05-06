@@ -1,7 +1,7 @@
 {
 open Lexing
 open Token
-open AST_Types
+open Type_Size
 
 let next_line lexbuf =
   let p = lexbuf.lex_curr_p in

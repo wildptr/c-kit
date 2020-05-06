@@ -1,20 +1,59 @@
 (* not-so-abstract syntax tree *)
 
 open ExtLib
+open Type_Size
 
-type int_size =
-  | Size_Char
-  | Size_Short
-  | Size_Int
-  | Size_Long
-  | Size_Long_Long
-[@@deriving show { with_path = false }]
+type 'a rope =
+  | One of 'a
+  | Seq of 'a rope * 'a rope
 
-type float_size =
-  | Size_Float
-  | Size_Double
-  | Size_Long_Double
-[@@deriving show { with_path = false }]
+let rec pp_rope pp f = function
+  | One x -> pp f x
+  | Seq (r1, r2) -> pp_rope pp f r1; pp_rope pp f r2
+
+type loc = Lexing.position * Lexing.position
+
+type token_seq =
+  | Empty of loc
+  | Nonempty of Preproc.token' rope
+
+let join_token_seq a b =
+  match (a, b) with
+  | (Empty (p1, _), Empty (_, p2)) -> Empty (p1, p2)
+  | (Empty _, Nonempty r) -> Nonempty r
+  | (Nonempty r, Empty _) -> Nonempty r
+  | (Nonempty r1, Nonempty r2) -> Nonempty (Seq (r1, r2))
+
+let concat_token_seq = function
+  | [] -> failwith "concat_token_seq"
+  | hd::tl -> List.fold_left join_token_seq hd tl
+
+type 'a node =
+  { nodeval : 'a;
+    tokens : token_seq }
+
+let rec token_rope_start = function
+  | One tok -> tok.Preproc.pos
+  | Seq (r, _) -> token_rope_start r
+
+let rec token_rope_end = function
+  | One tok -> Preproc.token_end_pos tok
+  | Seq (_, r) -> token_rope_end r
+
+let token_seq_loc = function
+  | Empty loc -> loc
+  | Nonempty r -> (token_rope_start r, token_rope_end r)
+
+let node_loc node =
+  token_seq_loc node.tokens
+
+let mk_node nodeval tokens = { nodeval; tokens }
+
+let pp_token_seq f = function
+  | Empty _ -> ()
+  | Nonempty r -> pp_rope Preproc.pp_token f r
+
+let pp_node _ f node = pp_token_seq f node.tokens
 
 type cv = bool * bool
 
@@ -42,36 +81,22 @@ type typ =
   | Array of typ * cv * int
   | Incomplete_Array of typ * cv
   | Bool
-  | Struct of int
-  | Union of int
+  | Struct of int * string option
+  | Union of int * string option
 
 and func_type = {
   return_type : typ;
-  param_types_opt : unit pdecl list option
+  param_types_opt : (typ list * bool) option
 }
-
-(* "polymorphic" declaration *)
-and 'a pdecl = {
-  d_storage : storage option;
-  d_cv : cv;
-  d_type : typ;
-  d_name : 'a (* 'a can be one of {unit, string option, string} *)
-}
-
-type decl = string pdecl
-
-let make_named_decl_opt { d_storage; d_cv; d_type; d_name } =
-  match d_name with
-  | None -> None
-  | Some name -> Some { d_storage; d_cv; d_type; d_name = name }
 
 let pp_cv f (c,v) =
   let open Format in
   if c then
     pp_print_string f "const";
-  if v then
+  if v then begin
     if c then pp_print_char f ' ';
     pp_print_string f "volatile"
+  end
 
 let pp_base_type_cv ~space m f (typ, cv) =
   let open Format in
@@ -104,10 +129,14 @@ let pp_base_type_cv ~space m f (typ, cv) =
       pp_print_string f "double"
     | Float Size_Long_Double ->
       pp_print_string f "long double"
-    | Struct id ->
-      fprintf f "struct #%d" id
-    | Union id ->
-      fprintf f "union #%d" id
+    | Struct (id, Some name) ->
+      fprintf f "struct %s /*#%d*/" name id
+    | Struct (id, None) ->
+      fprintf f "struct /*#%d*/" id
+    | Union (id, Some name) ->
+      fprintf f "union %s /*#%d*/" name id
+    | Union (id, None) ->
+      fprintf f "union /*#%d*/" id
     | _ -> assert false
   end;
   if space then pp_print_char f ' ';
@@ -148,13 +177,12 @@ let rec pp_typ_aux f (typ, cv) ~space ~enclose m =
 and pp_parameter_type_list f l =
   let open Format in
   match l with
-  | [] -> pp_print_string f "void"
-  | hd::tl ->
-    pp_typ_cv f (hd.d_type, hd.d_cv);
-    tl |> List.iter begin fun d ->
-      pp_print_string f ", ";
-      pp_typ_cv f (d.d_type, d.d_cv)
-    end
+  | ([], false) -> pp_print_string f "void"
+  | ([], true) -> pp_print_string f "..." (* ISO C forbids this *)
+  | (hd::tl, vararg) ->
+    pp_typ f hd;
+    tl |> List.iter (fprintf f ", %a" pp_typ);
+    if vararg then pp_print_string f ", ..."
 
 and pp_typ_cv f (typ, cv) =
   pp_typ_aux f (typ, cv) ~space:false ~enclose:false (fun f () -> ())
@@ -392,7 +420,9 @@ let lower_binop_i (isize, signed) = function
   | And    -> AndI    (isize, signed)
   | Xor    -> XorI    (isize, signed)
   | Or     -> OrI     (isize, signed)
-  | _ -> assert false
+  | Eq     -> EqI     (isize)
+  | NotEq  -> NotEqI  (isize)
+  | op -> failwith ("lower_binop_i: " ^ show_binary_op op)
 
 let lower_binop_i' isize = function
   | Eq    -> EqI    isize
@@ -440,14 +470,26 @@ type obj = {
   cv : cv
 }
 
-let obj_of_decl d =
-  { name = d.d_name;
-    typ = d.d_type;
-    storage = d.d_storage;
-    value = None;
-    cv = d.d_cv }
+let pp_pdecl' pp_name f (storage, cv, typ, name) =
+  let open Format in
+  begin match storage with
+    | Some Typedef ->
+      pp_print_string f "typedef "
+    | Some Extern ->
+      pp_print_string f "extern "
+    | Some Static ->
+      pp_print_string f "static "
+    | None -> ()
+  end;
+  pp_typ_aux f (typ, cv) ~space:true ~enclose:false
+(*     (fun f () -> Option.may (pp_print_string f) d.d_name) *)
+    (fun f () -> pp_name f name)
 
-type loc = Lexing.position * Lexing.position
+let pp_obj f v =
+  pp_pdecl' Format.pp_print_string f (v.storage, v.cv, v.typ, v.name);
+  match v.value with
+  | Some x -> Format.fprintf f " = %Ld" x
+  | None -> ()
 
 let pp_loc f ((pos0 : Lexing.position), (pos1: Lexing.position)) =
   let file = pos0.pos_fname
@@ -457,62 +499,90 @@ let pp_loc f ((pos0 : Lexing.position), (pos1: Lexing.position)) =
   and col_end = pos1.pos_cnum - pos1.pos_bol in
   Format.fprintf f "%s:%d:%d-%d:%d" file line_start col_start line_end col_end
 
-let pp_pdecl pp_name f d =
-  let open Format in
-  begin match d.d_storage with
-    | Some Typedef ->
-      pp_print_string f "typedef "
-    | Some Extern ->
-      pp_print_string f "extern "
-    | Some Static ->
-      pp_print_string f "static "
-    | None -> ()
-  end;
-  pp_typ_aux f (d.d_type, d.d_cv) ~space:true ~enclose:false
-(*     (fun f () -> Option.may (pp_print_string f) d.d_name) *)
-    (fun f () -> pp_name f d.d_name)
-
-let pp_decl f d = pp_pdecl Format.pp_print_string f d
-
-let pp_obj f v =
-  let open Format in
-  let d =
-    { d_storage = v.storage;
-      d_cv = v.cv;
-      d_type = v.typ;
-      d_name = v.name }
-  in
-  pp_decl f d;
-  match v.value with
-  | Some x -> Format.fprintf f " = %Ld" x
-  | None -> ()
-
 type expr_kind =
   | E_Ident of string * obj option
   | E_Lit of lit
-  | E_Call of expr * expr list
-  | E_Unary of unary_op * unary_op' option * expr
-  | E_IncDec of inc_dec_op * expr
-  | E_Addr of expr
-  | E_Binary of binary_op * binary_op' option * expr * expr
-  | E_Assign of expr * expr
-  | E_Seq of expr * expr
-  | E_Cond of expr * expr * expr
-  | E_SizeOfE of expr
+  | E_Call of expr node * expr node list
+  | E_Unary of unary_op * unary_op' option * expr node
+  | E_IncDec of inc_dec_op * expr node
+  | E_Addr of expr node
+  | E_Binary of binary_op * binary_op' option * expr node * expr node
+  | E_Assign of expr node * expr node
+  | E_Seq of expr node * expr node
+  | E_Cond of expr node * expr node * expr node
+  | E_SizeOfE of expr node
   | E_SizeOfT of typ
-  | E_Cast of typ * expr
-  | E_Deref of expr * cv
-  | E_Dot of expr * string * int option * cv
-  | E_Arrow of expr * string * int option * cv
-  | E_Index of expr * expr * cv
-  | E_Conv of expr
+  | E_Cast of typ * expr node
+  | E_Deref of expr node * cv
+  | E_Dot of expr node * string * int option * cv
+  | E_Arrow of expr node * string * int option * cv
+  | E_Index of expr node * expr node * cv
+  | E_Conv of expr node
 
 and expr = {
   e_kind : expr_kind;
   e_type_opt : typ option;
-  e_value : int64 option;
-  e_loc : loc
+  e_value : int64 option
 }
+
+[@@deriving show { with_path = false }]
+
+type 'a declarator =
+  | D_Base of 'a
+  | D_Ptr of 'a declarator node * cv
+  | D_Array of 'a declarator node * expr node option
+  | D_Func of 'a declarator node * string option pdecl list * bool(*vararg*)
+  | D_Old_Func of 'a declarator node * string list
+
+(* "polymorphic" declaration *)
+and 'a pdecl = {
+  d_storage : storage option;
+  d_cv : cv;
+  d_type : typ;
+  d_name : 'a; (* 'a can be one of {unit, string option, string} *)
+  d_declarator : 'a declarator node
+}
+
+type decl = string pdecl
+
+let rec make_named_declarator {nodeval=d; tokens} =
+  match d with
+  | D_Base None ->
+    assert false
+  | D_Base (Some name) ->
+    { nodeval = D_Base name; tokens }
+  | D_Ptr (d, cv) ->
+    { nodeval = D_Ptr (make_named_declarator d, cv); tokens }
+  | D_Array (d, e) ->
+    { nodeval = D_Array (make_named_declarator d, e); tokens }
+  | D_Func (d, l, va) ->
+    { nodeval = D_Func (make_named_declarator d, l, va); tokens }
+  | D_Old_Func (d, l) ->
+    { nodeval = D_Old_Func (make_named_declarator d, l); tokens }
+
+let rec make_named_declarator_opt {nodeval=d; tokens} =
+  match d with
+  | D_Base None -> None
+  | D_Base (Some name) ->
+    Some (mk_node (D_Base name) tokens)
+  | D_Ptr (d, cv) ->
+    Option.map (fun d' -> mk_node (D_Ptr (d', cv)) tokens) (make_named_declarator_opt d)
+  | D_Array (d, e) ->
+    Option.map (fun d' -> mk_node (D_Array (d', e)) tokens) (make_named_declarator_opt d)
+  | D_Func (d, l, va) ->
+    Option.map (fun d' -> mk_node (D_Func (d', l, va)) tokens) (make_named_declarator_opt d)
+  | D_Old_Func (d, l) ->
+    Option.map (fun d' -> mk_node (D_Old_Func (d', l)) tokens) (make_named_declarator_opt d)
+
+let make_named_decl_opt { d_storage; d_cv; d_type; d_name; d_declarator } =
+  match d_name with
+  | None -> None
+  | Some name ->
+    Some {
+      d_storage;
+      d_cv; d_type;
+      d_name = name;
+      d_declarator = make_named_declarator d_declarator }
 
 [@@deriving show { with_path = false }]
 
@@ -526,16 +596,28 @@ let is_nullptr e =
   has_type e && is_integer_type (get_type e) && e.e_value = Some 0L
 
 type init =
-  | Init_Expr of expr
-  | Init_List of init list * loc
+  | Init_Expr of expr node
+  | Init_List of init list node
 
 type init_decl = decl * init option
 
-let rec pp_init_list f il =
+let obj_of_decl d =
+  { name = d.d_name;
+    typ = d.d_type;
+    storage = d.d_storage;
+    value = None;
+    cv = d.d_cv }
+
+let pp_pdecl pp_name f d =
+  pp_pdecl' pp_name f (d.d_storage, d.d_cv, d.d_type, d.d_name)
+
+let pp_decl f d = pp_pdecl Format.pp_print_string f d
+
+(*let rec pp_init_list f il =
   let open Format in
   match il with
   | Init_Expr e ->
-    pp_expr f e
+    pp_node () f e
   | Init_List (l, _loc) ->
     pp_print_char f '{';
     begin match l with
@@ -544,22 +626,20 @@ let rec pp_init_list f il =
         fprintf f " %a" pp_init_list hd;
         List.iter (fprintf f ", %a" pp_init_list) tl
     end;
-    pp_print_string f " }"
+    pp_print_string f " }"*)
 
-let pp_init_decl f (d, init) =
+let pp_init_decl f (d, init_opt) =
   pp_decl f d;
-  match init with
+  match init_opt with
   | None -> ()
-  | Some il ->
-    Format.fprintf f " = %a" pp_init_list il
+  | Some (Init_Expr { tokens; _ } | Init_List { tokens; _ }) ->
+    Format.fprintf f " = %a" pp_token_seq tokens
 
 type struct_union_def = decl array
 
-(* type init_decl = decl * expr *)
-
 type label =
   | Ordinary_Label of string
-  | Case_Label of expr
+  | Case_Label of expr node
   | Default_Label
 [@@deriving show { with_path = false }]
 
@@ -567,18 +647,18 @@ type stmt =
   | S_Null
   | S_Label of label * stmt
   | S_Comp of block
-  | S_Expr of expr
-  | S_If of expr * stmt
-  | S_IfElse of expr * stmt * stmt
-  | S_Switch of expr * stmt
-  | S_While of expr * stmt
-  | S_DoWhile of stmt * expr
-  | S_For1 of expr option * expr option * expr option * stmt
-  | S_For2 of init_decl list * expr option * expr option * stmt
+  | S_Expr of expr node
+  | S_If of expr node * stmt
+  | S_IfElse of expr node * stmt * stmt
+  | S_Switch of expr node * stmt
+  | S_While of expr node * stmt
+  | S_DoWhile of stmt * expr node
+  | S_For1 of expr node option * expr node option * expr node option * stmt
+  | S_For2 of init_decl list * expr node option * expr node option * stmt
   | S_Goto of string
   | S_Continue
   | S_Break
-  | S_Return of expr option
+  | S_Return of expr node option
 
 and block_item =
   | Item_Decl of init_decl list

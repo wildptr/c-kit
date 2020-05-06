@@ -5,6 +5,7 @@
 open Token
 open AST
 open ExtLib
+open Type_Size
 
 module H =
   Hashtbl.Make(struct
@@ -89,13 +90,13 @@ let rec size_of_type conf env = function
   | Ptr _ -> ptr_size conf
   | Array (typ, _, n) ->
     n * align_up (size_of_type conf env typ) (align_of_type conf env typ)
-  | Struct id ->
+  | Struct (id, _) ->
     let fields = get_struct_union_def env id in
     Array.fold_left begin fun size decl ->
       let typ = decl.d_type in
       align_up size (align_of_type conf env typ) + size_of_type conf env typ
     end 0 fields
-  | Union id ->
+  | Union (id, _) ->
     let fields = get_struct_union_def env id in
     Array.fold_left
       (fun size decl -> max size (size_of_type conf env decl.d_type))
@@ -105,7 +106,7 @@ let rec size_of_type conf env = function
 (* make sure argument is object type before calling *)
 and align_of_type conf env = function
   | Bool | Int _ | Float _ | Ptr _ as typ -> size_of_type conf env typ
-  | Struct id | Union id ->
+  | Struct (id, _) | Union (id, _) ->
     let fields = get_struct_union_def env id in
     Array.fold_left
       (fun align decl -> max align (align_of_type conf env decl.d_type))
@@ -122,17 +123,28 @@ let print_message (loc, msgtype, msg) =
   in
   Format.eprintf "%a: %s: %s@." pp_loc loc msgtype_name msg
 
+let token_loc tok = (tok.Preproc.pos, Preproc.token_end_pos tok)
+
 type parser = {
-  supplier : unit -> Token.token * Lexing.position * Lexing.position;
-  mutable tok : token;
+  supplier : unit -> Preproc.token';
+  mutable tok : Preproc.token';
+(*
   mutable pos : Lexing.position; (* start of current lookahead token *)
   mutable last_end : Lexing.position; (* end of last consumed token *)
   mutable pos_end : Lexing.position; (* end of current lookahead token *)
-  mutable tokq : (token * Lexing.position * Lexing.position * Lexing.position) list;
+*)
+  mutable tokq : Preproc.token' list;
+  mutable current_node_tokseq : token_seq;
+  mutable tokseq_stack : token_seq list;
   env : env;
   messages : (loc * msgtype * string) Stack.t;
   config : config
 }
+
+let last_end p =
+  match p.current_node_tokseq with
+  | Empty (_, pos) -> pos
+  | Nonempty r -> token_rope_end r
 
 let lookup_obj env name =
   H.find env.obj_table name
@@ -177,25 +189,20 @@ let pop_scope env =
     env.ident_stack <- tl
 
 let declare env (d : decl) =
-  if d.d_storage = Some Typedef then
+  if d.d_storage = Some Typedef then begin
+    Format.eprintf "%a: type %s = %a@."
+      pp_loc (token_seq_loc d.d_declarator.tokens) d.d_name
+      pp_typ_cv (d.d_type, d.d_cv);
     declare_typedef env d.d_name (d.d_type, d.d_cv)
-  else
-    declare_object env (obj_of_decl d)
+  end  else declare_object env (obj_of_decl d)
 
 let make_parser' config supplier filename =
-  let tok, pos, pos_end = supplier () in
+  let tok = supplier () in
   { supplier;
     tok;
-    pos;
-    last_end =
-      Lexing.{
-        pos_fname = filename;
-        pos_lnum = 1;
-        pos_bol = 0;
-        pos_cnum = 0
-      };
-    pos_end;
     tokq = [];
+    current_node_tokseq = Empty (Lexing.dummy_pos, Lexing.dummy_pos);
+    tokseq_stack = [];
     env = new_env ();
     messages = Stack.create ();
     config }
@@ -204,7 +211,7 @@ let make_parser config ic filename =
   let supplier = Preproc.make_supplier ic filename in
   make_parser' config supplier filename
 
-let make_supplier_from_string s =
+(*let make_supplier_from_string s =
   let lexbuf = Lexing.from_string s in
   lexbuf.lex_curr_p <-
     { lexbuf.lex_curr_p with pos_fname = "<input>" };
@@ -218,37 +225,56 @@ let make_supplier_from_string s =
 
 let make_parser_s config s =
   let supplier = make_supplier_from_string s in
-  make_parser' config supplier "<input>"
+  make_parser' config supplier "<input>"*)
+
+let curtok p = p.tok.kind
 
 let skip p =
-  match p.tokq with
-  | (tok, pos, pos_end, last_end) :: tl ->
-    p.tok <- tok;
-    p.pos <- pos;
-    p.pos_end <- pos_end;
-    p.last_end <- last_end;
-    p.tokq <- tl
-  | [] ->
-    let tok, pos, pos_end = p.supplier () in
-    p.tok <- tok;
-    p.pos <- pos;
-    p.last_end <- p.pos_end;
-    p.pos_end <- pos_end
+  let tok' =
+    match p.tokq with
+    | hd::tl -> p.tokq <- tl; hd
+    | [] -> p.supplier ()
+  in
+  p.current_node_tokseq <-
+    join_token_seq p.current_node_tokseq (Nonempty (One p.tok));
+  (*Format.printf ">>> ";
+  p.tokseq_stack |> List.rev |> List.iter (Format.printf "%a│" pp_token_seq);
+  Format.printf "%a@." pp_token_seq p.current_node_tokseq;*)
+  p.tok <- tok'
+
+let skip' p =
+  let ts = Nonempty (One p.tok) in skip p; ts
+
+let start_node p =
+  p.tokseq_stack <- p.current_node_tokseq :: p.tokseq_stack;
+  p.current_node_tokseq <- Empty (p.tok.pos, p.tok.pos)
+
+let end_node p =
+  let ts = p.current_node_tokseq in
+  match p.tokseq_stack with
+  | hd::tl ->
+    p.current_node_tokseq <- join_token_seq hd ts;
+    p.tokseq_stack <- tl;
+    (*Format.printf "%a@." pp_token_seq ts;*)
+    ts
+  | [] -> failwith "end_node"
 
 let getsym p =
-  let tok = p.tok in
+  let tok = curtok p in
   skip p;
   tok
 
-let save_token p =
-  p.tok, p.pos, p.pos_end, p.last_end
-
-let ungetsym p (tok, pos, pos_end, last_end) =
-  p.tokq <- (p.tok, p.pos, p.pos_end, p.last_end) :: p.tokq;
-  p.tok <- tok;
-  p.pos <- pos;
-  p.pos_end <- pos_end;
-  p.last_end <- last_end
+let ungetsym p =
+  match p.current_node_tokseq with
+  | Nonempty (One tok) ->
+    p.tokq <- p.tok :: p.tokq;
+    p.tok <- tok;
+    p.current_node_tokseq <- Empty (tok.pos, tok.pos)
+  | Nonempty (Seq (ts, One tok)) ->
+    p.tokq <- p.tok :: p.tokq;
+    p.tok <- tok;
+    p.current_node_tokseq <- Nonempty ts
+  | _ -> failwith "ungetsym"
 
 let error p loc msg =
   Stack.push (loc, Error, msg) p.messages
@@ -259,22 +285,22 @@ let warn p loc msg =
 let get_messages p =
   p.messages |> Stack.to_seq |> List.of_seq |> List.rev
 
-exception Syntax_Error of Lexing.position
+exception Syntax_Error of Preproc.token'
 
-let syntax_error pos =
-  raise (Syntax_Error pos)
+let syntax_error tok =
+  raise (Syntax_Error tok)
 
 let expect p tok =
-  if p.tok <> tok then syntax_error p.pos;
+  if curtok p <> tok then syntax_error p.tok;
   skip p
 
 let expect_ident p =
-  match p.tok with
+  match curtok p with
   | Ident s -> skip p; s
-  | _ -> syntax_error p.pos
+  | _ -> syntax_error p.tok
 
 let try_read_ident p =
-  match p.tok with
+  match curtok p with
   | Ident s -> skip p; Some s
   | _ -> None
 
@@ -300,6 +326,9 @@ let unadjust e =
     if Some v.typ = e.e_type_opt then e else
       { e with e_type_opt = Some v.typ }
   | _ -> e
+
+let unadjust' enode =
+  { enode with nodeval = unadjust enode.nodeval }
 
 (*
 let mk_conv e typ' =
@@ -418,26 +447,16 @@ type spec = {
   mutable volatile : bool
 }
 
-type 'a declarator' =
-  | D_Base of 'a
-  | D_Ptr of 'a declarator * cv
-  | D_Array of 'a declarator * expr option
-  | D_Func of 'a declarator * string option pdecl list
-  | D_Old_Func of 'a declarator * string list
-and 'a declarator = 'a declarator' * loc
-
 let make_type spec =
   (* TODO: validate *)
   match spec.base with
-  | Unspecified ->
-    int
   | Spec_Void ->
     Void
   | Spec_Bool ->
     Bool
   | Spec_Char ->
     Int (Size_Char, Option.default true spec.sign)
-  | Spec_Int ->
+  | Unspecified | Spec_Int ->
     let size =
       match spec.size with
       | -1 -> Size_Short
@@ -467,89 +486,63 @@ let make_cv spec =
 
 (* TODO: propagate location information *)
 let make_decl' spec_storage spec_cv spec_typ
-    ((d, _loc) : 'a declarator) p =
+    ({nodeval=(d:'a declarator); tokens=_ts} as dnode) p =
   let rec loop qtyp = function
     | D_Base name -> (qtyp, name)
-    | D_Array ((d, _), e_opt) ->
-      let (typ, cv), name = loop qtyp d in
+    | D_Array (dnode, e_opt) ->
+      let (typ, cv), name = loop qtyp dnode.nodeval in
       begin match e_opt with
         | Some e ->
-          begin match e.e_value with
+          begin match e.nodeval.e_value with
             | Some n ->
               ((Array (typ, cv, Int64.to_int n), no_cv), name)
             | None ->
-              error p e.e_loc "not a constant expression";
+              error p (node_loc e) "not a constant expression";
               ((Incomplete_Array (typ, cv), no_cv), name)
           end
         | None ->
           ((Incomplete_Array (typ, cv), no_cv), name)
       end
-    | D_Func ((d, _), l) ->
-      let (typ, _), name = loop qtyp d in
-      let l' = List.map (fun d -> { d with d_name = () }) l in
+    | D_Func (dnode, l, vararg) ->
+      let (typ, _), name = loop qtyp dnode.nodeval in
+      let l' = List.map (fun d -> d.d_type) l in
       let func_type =
         { return_type = typ;
-          param_types_opt = Some l' }
+          param_types_opt = Some (l', vararg) }
       in
       ((Func func_type, no_cv), name)
-    | D_Old_Func ((d, _), _) ->
-      let (typ, _), name = loop qtyp d in
+    | D_Old_Func (dnode, _) ->
+      let (typ, _), name = loop qtyp dnode.nodeval in
       let func_type =
         { return_type = typ;
           param_types_opt = None }
       in
       ((Func func_type, no_cv), name)
-    | D_Ptr ((d, _), cv) ->
-      let (typ, cv'), name = loop qtyp d in
+    | D_Ptr (dnode, cv) ->
+      let (typ, cv'), name = loop qtyp dnode.nodeval in
       ((Ptr (typ, cv'), cv), name)
   in
   let (d_type, d_cv), d_name = loop (spec_typ, spec_cv) d in
   { d_storage = spec_storage;
     d_cv;
     d_type;
-    d_name }
+    d_name;
+    d_declarator = dnode }
 
 let make_decl spec d p =
   make_decl' spec.storage (make_cv spec) (make_type spec) d p
-
-let rec make_named_declarator = function
-  | (D_Base None, _loc) ->
-    assert false
-  | (D_Base (Some name), loc) ->
-    (D_Base name, loc)
-  | (D_Ptr (d, cv), loc) ->
-    (D_Ptr (make_named_declarator d, cv), loc)
-  | (D_Array (d, e), loc) ->
-    (D_Array (make_named_declarator d, e), loc)
-  | (D_Func (d, l), loc) ->
-    (D_Func (make_named_declarator d, l), loc)
-  | (D_Old_Func (d, l), loc) ->
-    (D_Old_Func (make_named_declarator d, l), loc)
-
-let rec make_named_declarator_opt = function
-  | (D_Base None, _loc) -> None
-  | (D_Base (Some name), loc) ->
-    (Some (D_Base name, loc))
-  | (D_Ptr (d, cv), loc) ->
-    Option.map (fun d' -> D_Ptr (d', cv), loc) (make_named_declarator_opt d)
-  | (D_Array (d, e), loc) ->
-    Option.map (fun d' -> D_Array (d', e), loc) (make_named_declarator_opt d)
-  | (D_Func (d, l), loc) ->
-    Option.map (fun d' -> D_Func (d', l), loc) (make_named_declarator_opt d)
-  | (D_Old_Func (d, l), loc) ->
-    Option.map (fun d' -> D_Old_Func (d', l), loc) (make_named_declarator_opt d)
 
 (* Parsing *)
 
 exception Type_Error
 
-let get_field_info su_type field_name e_loc p =
+let get_field_info su_type field_name tokseq p =
   let type_name_prefix, su_id =
     match su_type with
-    | Struct id ->
-      "struct ", id
-    | Union id ->
-      "union ", id
+    | Struct (id, _) ->
+      ("struct ", id)
+    | Union (id, _) ->
+      ("union ", id)
     | _ -> assert false
   in
   let su_table = p.env.su_table in
@@ -562,7 +555,7 @@ let get_field_info su_type field_name e_loc p =
     let field_id =
       try find_field fields field_name
       with Not_found ->
-        error p e_loc
+        error p (token_seq_loc tokseq)
           (Printf.sprintf "‘%s’ has no field named ‘%s’"
              type_name field_name);
         raise Type_Error
@@ -570,24 +563,24 @@ let get_field_info su_type field_name e_loc p =
     let d = fields.(field_id) in
     field_id, d.d_type, d.d_cv
   | None ->
-    error p e_loc
+    error p (token_seq_loc tokseq)
       (Printf.sprintf "access of member ‘%s’ of incomplete type ‘%s’"
          field_name type_name);
     raise Type_Error
 
 let check_inc_dec_operand op e p =
   (* ensure e is non-const-qualified lvalue *)
-  begin match lvalue_status e.e_kind with
+  begin match lvalue_status e.nodeval.e_kind with
   | None ->
-    error p e.e_loc
+    error p (node_loc e)
       (Printf.sprintf "operand of ‘%s’ is not an lvalue" (inc_dec_op_name op))
   | Some cv ->
     if cv_is_const cv then
-      error p e.e_loc
+      error p (node_loc e)
         (Printf.sprintf "operand of ‘%s’ is const-qualified" (inc_dec_op_name op))
   end;
   (* check type of e *)
-  begin match e.e_type_opt with
+  begin match e.nodeval.e_type_opt with
     | None -> ()
     | Some typ ->
       begin match typ with
@@ -597,7 +590,7 @@ let check_inc_dec_operand op e p =
         | Void
         | Bool
         | Struct _
-        | Union _ -> error p e.e_loc "type error"
+        | Union _ -> error p (node_loc e) "type error"
         | Func _
         | Array _
         | Incomplete_Array _ -> assert false
@@ -676,7 +669,7 @@ let rec kind_of_type env = function
       | Incomplete_Type -> Incomplete_Type
     end
   | Func _ -> Function_Type
-  | Struct id | Union id ->
+  | Struct (id, _) | Union (id, _) ->
     let su_info = DynArray.get env.su_table id in
     begin match su_info.def with
       | Some _ -> Object_Type
@@ -741,16 +734,16 @@ let with_types_of e1 e2 f =
    unary operation *)
 let type_unary_expr op e p : unary_op' option =
   let conf = p.config in
-  with_type_of e begin fun typ ->
+  with_type_of e.nodeval begin fun typ ->
     match op with
     | Plus | Minus -> (* perform promotion *)
-      ensure_arith_type typ p e.e_loc;
+      ensure_arith_type typ p (node_loc e);
       usual_arith_conv1' conf op typ
     | Not -> (* perform promotion *)
-      ensure_integer_type typ p e.e_loc;
+      ensure_integer_type typ p (node_loc e);
       usual_arith_conv1' conf op typ
     | LogNot -> (* no promotion *)
-      ensure_scalar_type typ p e.e_loc;
+      ensure_scalar_type typ p (node_loc e);
       LogNot'
   end
 
@@ -830,15 +823,15 @@ let usual_arith_conv' conf op t1 t2 =
 
 let type_binary_expr op e1 e2 p : binary_op' option =
   let conf = p.config in
-  with_types_of e1 e2 begin fun t1 t2 ->
+  with_types_of e1.nodeval e2.nodeval begin fun t1 t2 ->
     match op with
     | Mul | Div ->
-      ensure_arith_type t1 p e1.e_loc;
-      ensure_arith_type t2 p e2.e_loc;
+      ensure_arith_type t1 p (node_loc e1);
+      ensure_arith_type t2 p (node_loc e2);
       usual_arith_conv' conf op t1 t2
     | Mod | And | Xor | Or ->
-      ensure_arith_type t1 p e1.e_loc;
-      ensure_arith_type t2 p e2.e_loc;
+      ensure_arith_type t1 p (node_loc e1);
+      ensure_arith_type t2 p (node_loc e2);
       usual_arith_conv' conf op t1 t2
     | Add ->
       if is_arith_type t1 && is_arith_type t2 then begin
@@ -848,11 +841,11 @@ let type_binary_expr op e1 e2 p : binary_op' option =
         match t1, t2 with
         | Ptr (t1', cv), (Int _ | Bool) ->
           (* ptr + int *)
-          ensure_complete_type t1' p e1.e_loc;
+          ensure_complete_type t1' p (node_loc e1);
           AddPI (t1', cv)
         | (Int _ | Bool), Ptr (t2', cv) ->
           (* int + ptr *)
-          ensure_complete_type t2' p e2.e_loc;
+          ensure_complete_type t2' p (node_loc e2);
           AddIP (t2', cv)
         | _ ->
           raise Type_Error
@@ -865,25 +858,25 @@ let type_binary_expr op e1 e2 p : binary_op' option =
         match t1, t2 with
         | Ptr (t1', cv), (Int _ | Bool) ->
           (* ptr - int *)
-          ensure_complete_type t1' p e1.e_loc;
+          ensure_complete_type t1' p (node_loc e1);
           SubPI (t1', cv)
         | Ptr (t1', cv1), Ptr (t2', cv2) ->
           (* ptr - ptr *)
-          ensure_complete_type t1' p e1.e_loc;
-          ensure_complete_type t2' p e2.e_loc;
+          ensure_complete_type t1' p (node_loc e1);
+          ensure_complete_type t2' p (node_loc e2);
           if t1' <> t2' then begin
-            error p (fst e1.e_loc, snd e2.e_loc)
+            error p (fst (node_loc e1), snd (node_loc e2))
               "incompatible pointer types";
             raise Type_Error
           end;
           SubP (t1', cv1, cv2)
         | _ ->
-          error p (fst e1.e_loc, snd e2.e_loc) "type error";
+          error p (fst (node_loc e1), snd (node_loc e2)) "type error";
           raise Type_Error
       end
     | LShift | RShift ->
-      ensure_integer_type t1 p e1.e_loc;
-      ensure_integer_type t2 p e2.e_loc;
+      ensure_integer_type t1 p (node_loc e1);
+      ensure_integer_type t2 p (node_loc e2);
       let t1' = promote_integer_type conf t1 in
       lower_binop_i (get_int_type_info t1') op
     | Lt | Gt | LtEq | GtEq ->
@@ -897,14 +890,14 @@ let type_binary_expr op e1 e2 p : binary_op' option =
         | Ptr (t1', cv1), Ptr (t2', cv2) ->
           (* ptr op ptr *)
           if t1' <> t2' then
-            error p (fst e1.e_loc, snd e2.e_loc)
+            error p (fst (node_loc e1), snd (node_loc e2))
               "incompatible pointer types"
           else if is_func_type t1' then
-            warn p (fst e1.e_loc, snd e2.e_loc)
+            warn p (fst (node_loc e1), snd (node_loc e2))
               "ordered comparison on pointers to functions";
           lower_binop_p (t1', cv1, cv2) op
         | _ ->
-          error p (fst e1.e_loc, snd e2.e_loc) "type error";
+          error p (fst (node_loc e1), snd (node_loc e2)) "type error";
           raise Type_Error
       end
     | Eq | NotEq ->
@@ -925,21 +918,21 @@ let type_binary_expr op e1 e2 p : binary_op' option =
              not (is_func_type t2') && t1' = Void)
           | Ptr _, _ ->
             (* ptr op NULL *)
-            is_nullptr e2
+            is_nullptr e2.nodeval
           | _, Ptr _ ->
             (* NULL op ptr *)
-            is_nullptr e1
+            is_nullptr e1.nodeval
           | _ -> false
         in
         if not ok then begin
-          error p (fst e1.e_loc, snd e2.e_loc) "type error";
+          error p (fst (node_loc e1), snd (node_loc e2)) "type error";
           raise Type_Error
         end;
         lower_binop_i' conf.word_size op
       end
     | LogAnd | LogOr ->
-      ensure_scalar_type t1 p e1.e_loc;
-      ensure_scalar_type t2 p e2.e_loc;
+      ensure_scalar_type t1 p (node_loc e1);
+      ensure_scalar_type t2 p (node_loc e2);
       begin match op with
         | LogAnd -> LogAnd'
         | LogOr  -> LogOr'
@@ -948,14 +941,14 @@ let type_binary_expr op e1 e2 p : binary_op' option =
   end
 
 (* 6.5.2.1 *)
-let make_index_expr e1 e2 e_loc p =
+let make_index_expr e1 e2 tokseq p =
   let type_cv_opt =
-    with_types_of e1 e2 begin fun t1 t2 ->
+    with_types_of e1.nodeval e2.nodeval begin fun t1 t2 ->
       match t1, t2 with
       | Ptr (typ, cv), Int _ | Int _, Ptr (typ, cv) -> (typ, cv)
       | _ ->
         (* TODO improve error message *)
-        error p e_loc "type error in array subscript";
+        error p (token_seq_loc tokseq) "type error in array subscript";
         raise Type_Error
     end
   in
@@ -966,128 +959,130 @@ let make_index_expr e1 e2 e_loc p =
   in
 (*let e1' = promote_to_word_size p.config e1
   and e2' = promote_to_word_size p.config e2 in*)
+  mk_node
   { e_kind = E_Index (e1, e2, cv);
     e_type_opt;
-    e_value = None;
-    e_loc }
+    e_value = None } tokseq
 
 (* TODO: argument conversion *)
-let make_call_expr e1 es e_loc p =
+let make_call_expr e1 es tokseq p =
   let e_type_opt =
-    with_type_of e1 begin fun t1 ->
+    with_type_of e1.nodeval begin fun t1 ->
       match t1 with
       | Ptr (Func { return_type; param_types_opt }, _) ->
         (* check argument types *)
         begin match param_types_opt with
-          | Some param_types ->
-            if List.compare_lengths param_types es = 0 then begin
-              List.combine param_types es |>
-              List.iter begin fun (d, arg) ->
-                if not (can_assign_to arg d.d_type) then
-                  error p arg.e_loc "wrong argument type"
-              end
-            end else error p e_loc "wrong number of arguments"
+          | Some (param_types, va) ->
+            let len_ord = List.compare_lengths param_types es in
+            if va then begin
+              (* TODO *) ()
+            end else begin
+              if len_ord = 0 then begin
+                List.combine param_types es |>
+                List.iter begin fun (arg_type, arg) ->
+                  if not (can_assign_to arg.nodeval arg_type) then
+                    error p (node_loc arg) "wrong argument type"
+                end
+              end else error p (token_seq_loc tokseq) "wrong number of arguments"
+            end
           | None -> ()
         end;
         return_type
       | _ ->
-        error p e1.e_loc "called object is not a function";
+        error p (node_loc e1) "called object is not a function";
         raise Type_Error
     end
   in
+  mk_node
   { e_kind = E_Call (e1, es);
     e_type_opt;
-    e_value = None;
-    e_loc }
+    e_value = None } tokseq
 
-let make_dot_expr e1 field_name e_loc p =
-  let base_cv = get_cv e1 in
+let make_dot_expr e1 field_name tokseq p =
+  let base_cv = get_cv e1.nodeval in
   let field_info_opt =
-    with_type_of e1 begin function
+    with_type_of e1.nodeval begin function
       | Struct _ | Union _ as su_type ->
-        get_field_info su_type field_name e_loc p
+        get_field_info su_type field_name tokseq p
       | _ ->
-        error p e1.e_loc "left hand side of ‘.’ not a struct or union";
+        error p (node_loc e1) "left hand side of ‘.’ not a struct or union";
         raise Type_Error
     end
   in
   match field_info_opt with
   | Some (field_id, field_type, field_cv) ->
+    mk_node
     { e_kind = E_Dot (e1, field_name, Some field_id, cv_max field_cv base_cv);
       e_type_opt = Some field_type;
-      e_value = None;
-      e_loc }
+      e_value = None } tokseq
   | None ->
+    mk_node
     { e_kind = E_Dot (e1, field_name, None, base_cv);
       e_type_opt = None;
-      e_value = None;
-      e_loc }
+      e_value = None } tokseq
 
-let make_arrow_expr e1 field_name e_loc p =
+let make_arrow_expr e1 field_name tokseq p =
   let base_cv =
     Option.default no_cv begin
-      with_type_of e1 begin function
+      with_type_of e1.nodeval begin function
         | Ptr (_, cv) -> cv
         | _ -> raise Type_Error
       end
     end
   in
   let field_info_opt =
-    with_type_of e1 begin function
+    with_type_of e1.nodeval begin function
       | Ptr ((Struct _ | Union _ as su_type), _) ->
-        get_field_info su_type field_name e_loc p
+        get_field_info su_type field_name tokseq p
       | _ ->
-        error p e1.e_loc
+        error p (node_loc e1)
           "left hand side of ‘->’ not a pointer to struct or union";
         raise Type_Error
     end
   in
   match field_info_opt with
   | Some (field_id, field_type, field_cv) ->
+    mk_node
     { e_kind = E_Arrow (e1, field_name, Some field_id, cv_max field_cv base_cv);
       e_type_opt = Some field_type;
-      e_value = None;
-      e_loc }
+      e_value = None } tokseq
   | None ->
+    mk_node
     { e_kind = E_Arrow (e1, field_name, None, base_cv);
       e_type_opt = None;
-      e_value = None;
-      e_loc }
+      e_value = None } tokseq
 
-let make_inc_dec_expr op e1 e_loc p =
+let make_inc_dec_expr op e1 p =
   check_inc_dec_operand op e1 p;
   { e_kind = E_IncDec (op, e1);
-    e_type_opt = e1.e_type_opt;
-    e_value = None;
-    e_loc }
+    e_type_opt = e1.nodeval.e_type_opt;
+    e_value = None }
 
-let make_unary_expr op e1 e_loc p =
+let make_unary_expr op e1 p =
   let low_op_opt = type_unary_expr op e1 p in
   let e_type_opt = Option.map result_type_of_unop low_op_opt in
   { e_kind = E_Unary (op, low_op_opt, e1);
     e_type_opt;
-    e_value = eval_unary_expr op e1.e_value;
-    e_loc }
+    e_value = eval_unary_expr op e1.nodeval.e_value }
 
-let make_addr_expr e1 e_loc p =
+let make_addr_expr e1 p =
   let cv =
-    match lvalue_status e1.e_kind with
+    match lvalue_status e1.nodeval.e_kind with
     | Some cv -> cv
     | None ->
-      error p e1.e_loc "operand of ‘&’ is not an lvalue";
+      error p (node_loc e1) "operand of ‘&’ is not an lvalue";
       no_cv
   in
   { e_kind = E_Addr e1;
-    e_type_opt = Option.map (fun t1 -> Ptr (t1, cv)) e1.e_type_opt;
-    e_value = None;
-    e_loc }
+    e_type_opt = Option.map (fun t1 -> Ptr (t1, cv)) e1.nodeval.e_type_opt;
+    e_value = None }
 
-let make_deref_expr e1 e_loc p =
+let make_deref_expr e1 p =
   let type_cv_opt =
-    with_type_of e1 begin function
+    with_type_of e1.nodeval begin function
       | Ptr (typ, cv) -> typ, cv
       | _ ->
-        error p e1.e_loc "operand of ‘*’ is not of pointer type";
+        error p (node_loc e1) "operand of ‘*’ is not of pointer type";
         raise Type_Error
     end
   in
@@ -1098,20 +1093,19 @@ let make_deref_expr e1 e_loc p =
   in
   { e_kind = E_Deref (e1, cv);
     e_type_opt;
-    e_value = None;
-    e_loc }
+    e_value = None }
 
 let type_cond_expr e0 e1 e2 p =
-  Option.may (fun t0 -> ensure_scalar_type t0 p e0.e_loc) (e0.e_type_opt);
-  with_types_of e1 e2 begin fun t1 t2 ->
+  Option.may (fun t0 -> ensure_scalar_type t0 p (node_loc e0)) (e0.nodeval.e_type_opt);
+  with_types_of e1.nodeval e2.nodeval begin fun t1 t2 ->
     begin match t1, t2 with
       | Void, Void -> Void
-      | Struct id1, Struct id2 when id1 = id2 -> t1
-      | Union id1, Union id2 when id1 = id2 -> t1
+      | Struct (id1, _), Struct (id2, _) when id1 = id2 -> t1
+      | Union (id1, _), Union (id2, _) when id1 = id2 -> t1
       | Ptr (t1', cv1), Ptr (t2', cv2) when t1' = t2' ->
         Ptr (t1', cv_max cv1 cv2)
-      | Ptr _, _ when is_nullptr e2 -> t1
-      | _, Ptr _ when is_nullptr e1 -> t2
+      | Ptr _, _ when is_nullptr e2.nodeval -> t1
+      | _, Ptr _ when is_nullptr e1.nodeval -> t2
       | Ptr (Void, cv1), Ptr (_, cv2)
       | Ptr (_, cv1), Ptr (Void, cv2) ->
         Ptr (Void, cv_max cv1 cv2)
@@ -1119,7 +1113,7 @@ let type_cond_expr e0 e1 e2 p =
         if is_arith_type t1 && is_arith_type t2 then
           usual_arith_conv p.config t1 t2
         else begin
-          error p (fst e1.e_loc, snd e2.e_loc)
+          error p (fst (node_loc e1), snd (node_loc e2))
             "incompatible types in conditional expression";
           raise Type_Error
         end
@@ -1148,27 +1142,27 @@ let choose_enum_type conf lo hi =
     List.find (can_represent_range conf lo hi) [char; short; int]
   with Not_found -> int
 
-let mkbin op e1 e2 p =
+let mkbin (op, op_ts) e1 e2 p =
   let low_op_opt = type_binary_expr op e1 e2 p
-  and e_loc = fst e1.e_loc, snd e2.e_loc in
+  and e_loc = fst (node_loc e1), snd (node_loc e2) in
   let e_value =
     try
-      eval_binary_expr op e1.e_value e2.e_value
+      eval_binary_expr op e1.nodeval.e_value e2.nodeval.e_value
     with Division_by_zero ->
       warn p e_loc "division by zero in constant expression";
       None
   in
   let e_type_opt = Option.map (result_type_of_binop p.config) low_op_opt in
+  mk_node
   { e_kind = E_Binary (op, low_op_opt, e1, e2);
     e_type_opt;
-    e_value;
-    e_loc }
+    e_value } (concat_token_seq [e1.tokens; op_ts; e2.tokens])
 
 let mkassign e1 e2 p =
-  let e_loc = fst e1.e_loc, snd e2.e_loc in
+  let e_loc = fst (node_loc e1), snd (node_loc e2) in
   let e_type_opt =
-    with_types_of e1 e2 begin fun t1 t2 ->
-      if not (can_assign_to e2 t1) then begin
+    with_types_of e1.nodeval e2.nodeval begin fun t1 t2 ->
+      if not (can_assign_to e2.nodeval t1) then begin
         error p e_loc "type error in assignment";
         raise Type_Error
       end;
@@ -1177,8 +1171,7 @@ let mkassign e1 e2 p =
   in
   { e_kind = E_Assign (e1, e2);
     e_type_opt;
-    e_value = None;
-    e_loc }
+    e_value = None }
 
 let new_spec () =
   { base = Unspecified;
@@ -1268,216 +1261,219 @@ let end_pos (_, (_startp, endp)) = endp
 
 (* 6.5.1 *)
 let rec parse_primary_expr p =
-  let pos = p.pos in
-  let pos_end = p.pos_end in
-  match getsym p with
+  start_node p;
+  match curtok p with
   | Ident name ->
-    let e_loc = pos, pos_end in
+    skip p;
+    let tokseq = end_node p in
     begin
       try
         let v = lookup_obj p.env name in
         let e_type_opt = Some (adjust_array_func_type v.typ) in
+        mk_node
         { e_kind = E_Ident (name, Some v);
           e_type_opt;
-          e_value = v.value;
-          e_loc }
+          e_value = v.value } tokseq
       with Not_found ->
-        error p e_loc ("undeclared identifier ‘"^name^"’");
+        error p (token_seq_loc tokseq) ("undeclared identifier ‘"^name^"’");
+        mk_node
         { e_kind = E_Ident (name, None);
           e_type_opt = None;
-          e_value =  None;
-          e_loc }
+          e_value =  None } tokseq
     end
   | TInt (s, signed, size) ->
+    skip p;
+    mk_node
     { e_kind = E_Lit (IntLit s);
       e_type_opt = Some (Int (size, signed));
-      e_value = Some (Preproc.parse_int s);
-      e_loc = pos, pos_end }
+      e_value = Some (Preproc.parse_int s) } (end_node p)
   | TFloat (s, size) ->
+    skip p;
+    mk_node
     { e_kind = E_Lit (FloatLit s);
       e_type_opt = Some (Float size);
-      e_value = None;
-      e_loc = pos, pos_end }
+      e_value = None } (end_node p)
   | TChar s ->
+    skip p;
+    mk_node
     { e_kind = E_Lit (CharLit s);
       e_type_opt = Some char;
-      e_value = Some (Int64.of_int (Preproc.parse_char s));
-      e_loc = pos, pos_end }
+      e_value = Some (Int64.of_int (Preproc.parse_char s)) } (end_node p)
   | TString s ->
+    skip p;
+    mk_node
     { e_kind = E_Lit (StringLit s);
       e_type_opt = Some (Ptr (char, mk_cv true false)); (* adjusted *)
-      e_value = None;
-      e_loc = pos, pos_end }
+      e_value = None } (end_node p)
   | LParen ->
+    skip p;
     let e = parse_expr p in
-    let pos_end = p.pos_end in
     expect p RParen;
-    { e with e_loc = pos, pos_end }
+    { e with tokens = end_node p }
   | _ ->
-    syntax_error pos
+    syntax_error p.tok
 
 (* 6.5.2 *)
 and parse_postfix_expr p =
   let rec loop e1 =
-    match p.tok with
+    match curtok p with
     | LBrack -> (* a[b] *)
+      start_node p;
       skip p;
       let e2 = parse_expr p in
-      let e_loc = fst e1.e_loc, p.pos_end in
       expect p RBrack;
-      loop (make_index_expr e1 e2 e_loc p)
+      let tokseq = join_token_seq e1.tokens (end_node p) in
+      loop (make_index_expr e1 e2 tokseq p)
     | LParen -> (* f(...) *)
+      start_node p;
       skip p;
       let es = parse_arg_list p in
-      let e_loc = fst e1.e_loc, p.pos_end in
       expect p RParen;
-      loop (make_call_expr e1 es e_loc p)
+      let tokseq = join_token_seq e1.tokens (end_node p) in
+      loop (make_call_expr e1 es tokseq p)
     | Dot -> (* a.b *)
+      start_node p;
       skip p;
-      let e_loc = fst e1.e_loc, p.pos_end in
       let field_name = expect_ident p in
-      loop (make_dot_expr e1 field_name e_loc p)
+      let tokseq = join_token_seq e1.tokens (end_node p) in
+      loop (make_dot_expr e1 field_name tokseq p)
     | Arrow -> (* a->b *)
+      start_node p;
       skip p;
-      let e_loc = fst e1.e_loc, p.pos_end in
       let field_name = expect_ident p in
-      loop (make_arrow_expr e1 field_name e_loc p)
+      let tokseq = join_token_seq e1.tokens (end_node p) in
+      loop (make_arrow_expr e1 field_name tokseq p)
     | PlusPlus -> (* a++ *)
-      let e_loc = fst e1.e_loc, p.pos_end in
-      skip p;
-      loop (make_inc_dec_expr PostInc e1 e_loc p)
+      let tokseq = join_token_seq e1.tokens (skip' p) in
+      loop (mk_node (make_inc_dec_expr PostInc e1 p) tokseq)
     | MinusMinus -> (* a-- *)
-      let e_loc = fst e1.e_loc, p.pos_end in
-      skip p;
-      loop (make_inc_dec_expr PostDec e1 e_loc p)
+      let tokseq = join_token_seq e1.tokens (skip' p) in
+      loop (mk_node (make_inc_dec_expr PostDec e1 p) tokseq)
     | _ -> e1
   in
   loop (parse_primary_expr p)
 
 (* 6.5.3 *)
 and parse_unary_expr p =
-  match p.tok with
+  match curtok p with
   | PlusPlus -> (* ++a *)
-    let pos = p.pos in
+    start_node p;
     skip p;
     let e1 = parse_unary_expr p in
-    let e_loc = pos, snd e1.e_loc in
-    make_inc_dec_expr PreInc e1 e_loc p
+    let tokseq = end_node p in
+    mk_node (make_inc_dec_expr PreInc e1 p) tokseq
   | MinusMinus -> (* --a *)
-    let pos = p.pos in
+    start_node p;
     skip p;
     let e1 = parse_unary_expr p in
-    let e_loc = pos, snd e1.e_loc in
-    make_inc_dec_expr PreDec e1 e_loc p
+    let tokseq = end_node p in
+    mk_node (make_inc_dec_expr PreDec e1 p) tokseq
   | TPlus | TMinus | Tilde | Bang ->
-    let pos = p.pos in
     let op =
-      match p.tok with
+      match curtok p with
       | TPlus -> Plus
       | TMinus -> Minus
       | Tilde -> Not
       | Bang -> LogNot
       | _ -> assert false
     in
+    start_node p;
     skip p;
     let e1 = parse_cast_expr p in
-    let e_loc = pos, snd e1.e_loc in
-    make_unary_expr op e1 e_loc p
+    let tokseq = end_node p in
+    mk_node (make_unary_expr op e1 p) tokseq
   | TAnd ->
-    let pos = p.pos in
+    start_node p;
     skip p;
-    let e1 = parse_cast_expr p |> unadjust in
-    let e_loc = pos, snd e1.e_loc in
-    make_addr_expr e1 e_loc p
+    let e1 = parse_cast_expr p |> unadjust' in
+    let tokseq = end_node p in
+    mk_node (make_addr_expr e1 p) tokseq
   | Star ->
-    let pos = p.pos in
+    start_node p;
     skip p;
     let e1 = parse_cast_expr p in
-    let e_loc = pos, snd e1.e_loc in
-    make_deref_expr e1 e_loc p
+    let tokseq = end_node p in
+    mk_node (make_deref_expr e1 p) tokseq
   | SIZEOF ->
-    let size_of_type' typ loc =
+    let size_of_type' typ tokseq =
       if kind_of_type p.env typ = Object_Type then
         Some (Int64.of_int (size_of_type p.config p.env typ))
       else begin
-        error p loc "size of operand of ‘sizeof’ is unknown";
+        error p (token_seq_loc tokseq) "size of operand of ‘sizeof’ is unknown";
         None
       end
     in
-    let make_sizeof_e e_loc e =
+    let make_sizeof_e e =
       let e_value =
-        match e.e_type_opt with
-        | Some t -> size_of_type' t e_loc
+        match e.nodeval.e_type_opt with
+        | Some t -> size_of_type' t e.tokens
         | None -> None
       in
       { e_kind = E_SizeOfE e;
         e_type_opt = Some (size_t p.config);
-        e_value;
-        e_loc }
-    and make_sizeof_t e_loc typ =
+        e_value }
+    and make_sizeof_t tokseq typ =
       { e_kind = E_SizeOfT typ;
         e_type_opt = Some (size_t p.config);
-        e_value = size_of_type' typ e_loc;
-        e_loc }
+        e_value = size_of_type' typ tokseq }
     in
-    let sizeof_pos = p.pos in
+    start_node p; (* sizeof ... *)
     skip p;
-    if p.tok = LParen then begin
-      let lparen_pos = p.pos in
+    if curtok p = LParen then begin
       skip p;
-      if starts_type p.env p.tok then begin
+      if starts_type p.env (curtok p) then begin
+        start_node p;
         let typ = parse_type_name p in
+        let tokseq = end_node p in
         expect p RParen;
-        make_sizeof_t (sizeof_pos, p.last_end) typ
+        mk_node (make_sizeof_t tokseq typ) (end_node p)
       end else begin
         (* sizeof(expr) *)
-        let e1 =
-          let e = parse_expr p |> unadjust in
-          { e with e_loc = lparen_pos, p.pos_end }
-        in
+        let e1 = parse_expr p |> unadjust' in
         expect p RParen;
-        make_sizeof_e (sizeof_pos, p.last_end) e1
+        mk_node (make_sizeof_e e1) (end_node p)
       end
     end else begin
       (* sizeof expr *)
-      let e1 = parse_unary_expr p |> unadjust in
-      let e_loc = sizeof_pos, snd e1.e_loc in
-      make_sizeof_e e_loc e1
+      let e1 = parse_unary_expr p |> unadjust' in
+      mk_node (make_sizeof_e e1) (end_node p)
     end
   | _ ->
     parse_postfix_expr p
 
 (* 6.5.4 *)
 and parse_cast_expr p =
-  match p.tok with
+  match curtok p with
   | LParen ->
+    start_node p;
     skip p;
-    if starts_type p.env p.tok then begin
-      let start_pos = p.pos in
+    if starts_type p.env (curtok p) then begin
       let typ =
+        start_node p;
         let typ = parse_type_name p in
+        let tokseq = end_node p in
         if not (is_scalar_type typ || typ = Void) then
-          error p (start_pos, p.last_end) "scalar type or void expected";
+          error p (token_seq_loc tokseq) "scalar type or void expected";
         typ
       in
       expect p RParen;
       let e = parse_cast_expr p in
+      mk_node
       { e_kind = E_Cast (typ, e);
         e_type_opt = Some typ;
-        e_value = e.e_value;
-        e_loc = start_pos, p.last_end }
+        e_value = e.nodeval.e_value } (end_node p)
     end else begin
       let e = parse_expr p in
       expect p RParen;
-      e
+      { e with tokens = end_node p }
     end
   | _ -> parse_unary_expr p
 
 and parse_arg_list p =
-  if p.tok = RParen then [] else begin
+  if curtok p = RParen then [] else begin
     let e = parse_assign_expr p in
     let rec loop acc =
-      if p.tok = Comma then begin
+      if curtok p = Comma then begin
         skip p;
         let e = parse_assign_expr p in
         loop (e::acc)
@@ -1500,14 +1496,14 @@ and parse_binary_expr p =
     if not (Stack.is_empty ops || snd (Stack.top ops) > prec) then reduce prec
   in
   let rec loop () =
-    match binop_of_token p.tok with
+    match binop_of_token (curtok p) with
     | Some (op, prec) ->
-      skip p;
+      let op_ts = skip' p in
       if not (Stack.is_empty ops || snd (Stack.top ops) > prec) then
         (* ops not empty, and top of ops has precedence higher than or equal
            to prec *)
         reduce prec;
-      Stack.push (op, prec) ops;
+      Stack.push ((op, op_ts), prec) ops;
       Stack.push (parse_cast_expr p) es;
       loop ()
     | None ->
@@ -1520,38 +1516,43 @@ and parse_binary_expr p =
 
 and parse_cond_expr p =
   let e1 = parse_binary_expr p in
-  if p.tok = Quest then begin
-    skip p;
+  if curtok p = Quest then begin
+    let ts_quest = skip' p in
     let e2 = parse_expr p in
-    expect p Colon;
+    let ts_colon = skip' p in
     let e3 = parse_cond_expr p in
     let e_type_opt = type_cond_expr e1 e2 e3 p in
+    mk_node
     { e_kind = E_Cond (e1, e2, e3);
       e_type_opt;
-      e_value = eval_cond_expr e1.e_value e2.e_value e3.e_value;
-      e_loc = fst e1.e_loc, snd e3.e_loc }
+      e_value = eval_cond_expr e1.nodeval.e_value e2.nodeval.e_value e3.nodeval.e_value }
+    (concat_token_seq [e1.tokens; ts_quest; e2.tokens; ts_colon; e3.tokens])
   end else e1
 
 and parse_assign_expr p =
   let e1 = parse_cond_expr p in
-  match assign_op_of_token p.tok with
+  match assign_op_of_token (curtok p) with
   | Some op ->
-    skip p;
+    let op_ts = skip' p in
     let e2 = parse_assign_expr p in
-    if op = Assign then mkassign e1 e2 p else
-      mkassign e1 (mkbin (binop_of_assign_op op) e1 e2 p) p
+    let tokseq = (concat_token_seq [e1.tokens; op_ts; e2.tokens]) in
+    (* token seq. of the whole assign expr. is NOT the concatenation of
+       its components if it's a compound assignment *)
+    if op = Assign then mk_node (mkassign e1 e2 p) tokseq else
+      mk_node (mkassign e1 (mkbin (binop_of_assign_op op, op_ts) e1 e2 p) p) tokseq
   | None -> e1
 
 and parse_expr p =
   let rec loop e1 =
-    if p.tok = Comma then begin
-      skip p;
+    if curtok p = Comma then begin
+      let ts_comma = skip' p in
       let e2 = parse_assign_expr p in
       let e =
+        mk_node
         { e_kind = E_Seq (e1, e2);
-          e_type_opt = e2.e_type_opt;
-          e_value = None; (* by definition... *)
-          e_loc = fst e1.e_loc, snd e2.e_loc }
+          e_type_opt = e2.nodeval.e_type_opt;
+          e_value = None; (* "(a,b)" is not a const. expr. by definition *) }
+        (concat_token_seq [e1.tokens; ts_comma; e2.tokens])
       in
       loop e
     end else e1
@@ -1560,43 +1561,49 @@ and parse_expr p =
 
 and parse_constant_expr p =
   let e = parse_cond_expr p in
-  if e.e_value = None then
-    error p e.e_loc "not a constant expression";
+  if e.nodeval.e_value = None then
+    error p (node_loc e) "not a constant expression";
   e
 
 and parse_parameter_type_list p =
-  let rec loop acc =
-    if p.tok = Comma then begin
+  let rec loop (acc, va) =
+    if curtok p = Comma then begin
       skip p;
-      let decl = parse_decl p in
-      loop (decl::acc)
-    end else acc
+      if curtok p = Ellipsis then (skip p; (acc, true))
+      else begin
+        let decl = parse_decl p in
+        loop (decl::acc, va)
+      end
+    end else (acc, va)
   in
-  loop [parse_decl p] |> List.rev
+  let (l, va) = loop ([parse_decl p], false) in
+  (List.rev l, va)
 
 and parse_direct_declarator allow_anon p =
   let rec loop d1 =
-    match p.tok with
+    match curtok p with
     | LParen ->
+      start_node p;
       skip p;
-      if starts_type p.env p.tok then begin
+      if starts_type p.env (curtok p) then begin
         push_scope p.env; (* function prototype scope *)
-        let l = parse_parameter_type_list p in
+        let (l, va) = parse_parameter_type_list p in
         pop_scope p.env;
         expect p RParen;
+        let tokseq = end_node p in
         let l' =
           match l with
           | [{ d_type = Void; _ }] -> [] (* f(void) *)
           | _ -> l
         in
-        loop (D_Func (d1, l'), (start_pos d1, p.last_end))
+        loop (mk_node (D_Func (d1, l', va)) (join_token_seq d1.tokens tokseq))
       end else begin
-        match p.tok with
+        match curtok p with
         | Ident name ->
           (* old-style function declarator *)
           skip p;
           let rec loop' acc =
-            if p.tok = Comma then begin
+            if curtok p = Comma then begin
               skip p;
               let name' = expect_ident p in
               loop' (name'::acc)
@@ -1604,98 +1611,124 @@ and parse_direct_declarator allow_anon p =
           in
           let l = loop' [name] |> List.rev in
           expect p RParen;
-          loop (D_Old_Func (d1, l), (start_pos d1, p.last_end))
+          let tokseq = end_node p in
+          loop (mk_node (D_Old_Func (d1, l)) (join_token_seq d1.tokens tokseq))
         | RParen ->
           skip p;
-          loop (D_Old_Func (d1, []), (start_pos d1, p.last_end))
+          let tokseq = end_node p in
+          loop (mk_node (D_Old_Func (d1, [])) (join_token_seq d1.tokens tokseq))
         | _ ->
-          syntax_error p.pos
+          syntax_error p.tok
       end
     | LBrack ->
+      start_node p;
       skip p;
-      begin match p.tok with
+      begin match curtok p with
         | RBrack ->
           skip p;
-          loop (D_Array (d1, None), (start_pos d1, p.last_end))
+          let tokseq = end_node p in
+          loop (mk_node (D_Array (d1, None)) (join_token_seq d1.tokens tokseq))
         | _ ->
           let e = parse_constant_expr p in
           expect p RBrack;
-          loop (D_Array (d1, Some e), (start_pos d1, p.last_end))
+          let tokseq = end_node p in
+          loop (mk_node (D_Array (d1, Some e)) (join_token_seq d1.tokens tokseq))
       end
     | _ -> d1
   in
   let d =
-    match p.tok with
+    match curtok p with
     | Ident name ->
-      let startp = p.pos in
-      skip p;
-      (D_Base (Some name), (startp, p.last_end))
+      let ts = skip' p in
+      mk_node (D_Base (Some name)) ts
     | LParen -> (* parse as function declarator: "(T...)" "()" *)
-      let startp = p.pos in
-      let saved_token = save_token p in
+      start_node p;
       skip p;
-      begin match p.tok with
+      begin match curtok p with
       | Ident name as tok when not (starts_type p.env tok) ->
         let d = parse_declarator allow_anon p in
         expect p RParen;
-        (fst d, (startp, p.last_end))
+        let tokseq = end_node p in
+        { d with tokens = tokseq }
       | _ ->
-        ungetsym p saved_token;
-        if allow_anon then (D_Base None, (startp, startp)) else
-          syntax_error p.pos
+        ungetsym p;
+        let ts = end_node p in (* ts is empty *)
+        if allow_anon then mk_node (D_Base None) ts else
+          syntax_error p.tok
       end
     | _ ->
-      let pos = p.pos in
-      if allow_anon then (D_Base None, (pos, pos)) else
-        syntax_error pos
+      let pos = p.tok.pos in
+      let ts = Empty (pos, pos) in
+      if allow_anon then mk_node (D_Base None) ts else
+        syntax_error p.tok
   in
   loop d
 
-and parse_declarator allow_anon p : string option declarator =
-  match p.tok with
+and parse_declarator allow_anon p : string option declarator node =
+  match curtok p with
   | Star ->
-    let startp = p.pos in
+    start_node p;
     skip p;
     let rec loop (c, v) =
       (* TODO: report duplicate qualifiers *)
-      match p.tok with
+      match curtok p with
       | CONST ->
         skip p;
         loop (true, v)
       | VOLATILE ->
         skip p;
         loop (c, true)
+      | RESTRICT ->
+        skip p;
+        loop (c, v) (* TODO *)
       | _ -> (c, v)
     in
     let cv = loop (false, false) in
     let d = parse_declarator allow_anon p in
-    (D_Ptr (d, cv), (startp, p.last_end))
+    mk_node (D_Ptr (d, cv)) (end_node p)
   | _ ->
     parse_direct_declarator allow_anon p
 
 and parse_named_declarator p =
   parse_declarator false p |> make_named_declarator
 
-and parse_init_declarator p =
-  let d = parse_named_declarator p in
-  match p.tok with
+and parse_initializer p =
+  if curtok p = LBrace then begin
+    start_node p;
+    skip p;
+    let i1 = parse_initializer p in
+    let rec loop acc =
+      if curtok p = Comma then begin
+        skip p;
+        if curtok p = RBrace then acc
+        else loop (parse_initializer p :: acc)
+      end else acc
+    in
+    let il = List.rev (loop [i1]) in
+    expect p RBrace;
+    Init_List (mk_node il (end_node p))
+  end else Init_Expr (parse_assign_expr p)
+
+(* actually enters the declared symbol nto symbol table *)
+and parse_init_decl spec p =
+  let d = make_decl spec (parse_named_declarator p) p in
+  declare p.env d;
+  match curtok p with
   | Token.Eq ->
     skip p;
-    (* TODO: initializer list *)
-    let e = parse_expr p in
-    (d, Some (Init_Expr e))
+    (d, Some (parse_initializer p))
   | _ ->
     (d, None)
 
 and try_parse_declarator p =
-  match p.tok with
+  match curtok p with
   | Ident _ | Star | LBrack | LParen -> parse_declarator true p
-  | _ -> (D_Base None, (p.pos, p.pos))
+  | _ -> mk_node (D_Base None) (Empty (p.tok.pos, p.tok.pos))
 
 and parse_spec p =
   let errmsg = "invalid specifier" in
   let spec = new_spec () in
-  begin match p.tok with
+  begin match curtok p with
     | TYPEDEF ->
       skip p;
       spec.storage <- Some Typedef
@@ -1708,12 +1741,12 @@ and parse_spec p =
     | _ -> ()
   end;
   let rec loop () =
-    let start_pos = p.pos in
-    let loc = p.pos, p.pos_end in
-    match p.tok with
+    let start_pos = p.tok.pos in
+    let loc = token_loc p.tok in
+    match curtok p with
     | VOID | BOOL | CHAR | INT | FLOAT | DOUBLE ->
       let base =
-        match p.tok with
+        match curtok p with
         | VOID -> Spec_Void
         | BOOL -> Spec_Bool
         | CHAR -> Spec_Char
@@ -1760,15 +1793,16 @@ and parse_spec p =
     | STRUCT | UNION ->
       let typ = parse_struct_union_spec p in
       if spec.base = Unspecified then spec.base <- Spec_Type typ else
-        error p (start_pos, p.last_end) errmsg
+        error p (start_pos, last_end p) errmsg;
+      loop ()
     | ENUM ->
-      let enum_pos = p.pos in
+      let enum_pos = p.tok.pos in
       skip p;
       let env = p.env in
       let tag_opt = try_read_ident p in
       (* see if a definition is provided *)
       let typ =
-        if p.tok = LBrace then begin
+        if curtok p = LBrace then begin
           skip p;
           let el = parse_enumerator_list p in
           expect p RBrace;
@@ -1778,14 +1812,14 @@ and parse_spec p =
             | (name1, value_opt1) :: tl ->
               let value1 =
                 match value_opt1 with
-                | Some { e_value = Some value; _ } -> value
+                | Some { nodeval = { e_value = Some value; _ }; _ } -> value
                 | _ -> 0L
               in
               define_constant env name1 int value1;
               List.fold_left begin fun (prev_value, lo, hi) (name, value_opt) ->
                 let cur_value =
                   match value_opt with
-                  | Some { e_value = Some value; _ } -> value
+                  | Some { nodeval = { e_value = Some value; _ }; _ } -> value
                   | _ -> Int64.add prev_value 1L
                 in
                 define_constant env name int cur_value;
@@ -1809,24 +1843,27 @@ and parse_spec p =
               | exception Not_found ->
                 (* The tag is not defined, and no definition is provided.
                    This is an error. *)
-                error p (enum_pos, p.last_end) "enum type is not defined";
+                error p (enum_pos, last_end p) "enum type is not defined";
                 raise Type_Error
             end
           | None ->
             (* No tag, and no definition, just a bare "enum". *)
-            error p (enum_pos, p.last_end) "invalid ‘enum’";
+            error p (enum_pos, last_end p) "invalid ‘enum’";
             raise Type_Error
         end
       in
       if spec.base = Unspecified then spec.base <- Spec_Type typ else
-        error p loc errmsg
+        error p loc errmsg;
+      loop ()
     | Ident name when is_typedef_name p.env name ->
+      skip p;
       let typ, cv = get_typedef_type p.env name in
       (* TODO: report duplicate qualifiers *)
       if cv_is_const cv then spec.const <- true;
       if cv_is_volatile cv then spec.volatile <- true;
-      if spec.base = Unspecified then spec.base <- Spec_Type typ else
-        error p loc errmsg
+      if spec.base = Unspecified then spec.base <- Spec_Type typ
+      else error p loc errmsg;
+      loop ()
     | _ -> ()
   in
   loop ();
@@ -1836,7 +1873,7 @@ and parse_struct_union_spec p =
   let wrong_tag_error name =
     (Printf.sprintf "‘%s’ defined as wrong kind of tag" name)
   in
-  let keyword_loc = (p.pos, p.pos_end) in
+  let keyword_loc = (p.tok.pos, last_end p) in
   let is_union =
     match getsym p with
     | STRUCT -> false
@@ -1852,7 +1889,7 @@ and parse_struct_union_spec p =
     Option.may (fun tag -> declare_tag env tag tag_type) tag_opt;
     id
   in
-  let tag_pos = p.pos in
+  let tag_pos = p.tok.pos in
   let tag_opt = try_read_ident p in
   let id =
     match tag_opt with
@@ -1860,20 +1897,20 @@ and parse_struct_union_spec p =
       begin match H.find env.tag_table tag with
         | Tag_Struct id ->
           if is_union then
-            error p (tag_pos, p.last_end) (wrong_tag_error tag);
+            error p (tag_pos, last_end p) (wrong_tag_error tag);
           id
         | Tag_Union id ->
           if not is_union then
-            error p (tag_pos, p.last_end) (wrong_tag_error tag);
+            error p (tag_pos, last_end p) (wrong_tag_error tag);
           id
         | Tag_Enum _ ->
-          error p (tag_pos, p.last_end) (wrong_tag_error tag);
+          error p (tag_pos, last_end p) (wrong_tag_error tag);
           new_id tag_opt
         | exception Not_found -> new_id tag_opt
       end
     | None -> new_id None
   in
-  if p.tok = LBrace then begin
+  if curtok p = LBrace then begin
     skip p;
     let def = parse_struct_decl_list p |> Array.of_list in
     expect p RBrace;
@@ -1881,13 +1918,13 @@ and parse_struct_union_spec p =
     (* TODO: report redefinition *)
     name_def.def <- Some def
   end else if tag_opt = None then error p keyword_loc "invalid specifier";
-  if is_union then Union id else Struct id
+  if is_union then Union (id, tag_opt) else Struct (id, tag_opt)
 
 and parse_enumerator_list p =
   let parse_enumerator p =
     let name = expect_ident p in
     let value_opt =
-      if p.tok = Eq then begin
+      if curtok p = Eq then begin
         skip p;
         let e = parse_constant_expr p in
         Some e
@@ -1896,10 +1933,10 @@ and parse_enumerator_list p =
     (name, value_opt)
   in
   let rec loop acc =
-    match p.tok with
+    match curtok p with
     | Comma ->
       skip p;
-      if p.tok = RBrace then acc else
+      if curtok p = RBrace then acc else
         loop (parse_enumerator p :: acc)
     | _ -> acc
   in
@@ -1907,7 +1944,7 @@ and parse_enumerator_list p =
 
 and parse_struct_decl_list p =
   let rec loop acc =
-    if starts_type p.env p.tok then begin
+    if starts_type p.env (curtok p) then begin
       let d = parse_struct_declaration p in
       loop (d @ acc)
     end else acc
@@ -1915,29 +1952,23 @@ and parse_struct_decl_list p =
   let d = parse_struct_declaration p in
   loop d |> List.rev
 
-and parse_decl p =
+and parse_decl p : string option pdecl =
   let spec = parse_spec p in
   let d = try_parse_declarator p in
   make_decl spec d p
 
-and parse_declaration p =
+(* consumes terminating semicolon *)
+and parse_declaration p : init_decl list =
   let spec = parse_spec p in
-  let cv = make_cv spec
-  and typ = make_type spec in
-  if p.tok = Semi then begin
+  if curtok p = Semi then begin
     skip p;
     []
   end else begin
-    let collect acc =
-      let dr, init = parse_init_declarator p in
-      let d = make_decl' spec.storage cv typ dr p in
-      declare p.env d;
-      (d, init) :: acc
-    in
+    let collect acc = parse_init_decl spec p :: acc in
     let rec loop acc =
-      match p.tok with
+      match curtok p with
       | Semi -> skip p; acc
-      | Comma -> loop (collect acc)
+      | Comma -> skip p; loop (collect acc)
       | _ -> acc
     in
     loop (collect []) |> List.rev
@@ -1947,12 +1978,12 @@ and parse_struct_declaration p =
   let spec = parse_spec p in
   let cv = make_cv spec
   and typ = make_type spec in
-  if p.tok = Semi then begin
+  if curtok p = Semi then begin
     skip p;
     []
   end else begin
     let rec loop acc =
-      match p.tok with
+      match curtok p with
       | Semi -> skip p; acc
       | Comma ->
         skip p;
@@ -1971,7 +2002,7 @@ and parse_type_name p =
 (* statements *)
 
 let rec parse_stmt p =
-  match p.tok with
+  match curtok p with
   | CASE ->
     skip p;
     let case_expr = parse_constant_expr p in
@@ -2001,7 +2032,7 @@ let rec parse_stmt p =
     S_Break
   | RETURN ->
     skip p;
-    if p.tok = Semi then begin
+    if curtok p = Semi then begin
       skip p;
       S_Return None
     end else begin
@@ -2015,7 +2046,7 @@ let rec parse_stmt p =
     let e = parse_expr p in
     expect p RParen;
     let s1 = parse_stmt p in
-    begin match p.tok with
+    begin match curtok p with
       | ELSE ->
         skip p;
         let s2 = parse_stmt p in
@@ -2049,10 +2080,10 @@ let rec parse_stmt p =
   | FOR ->
     skip p;
     expect p LParen;
-    if starts_type p.env p.tok then begin
+    if starts_type p.env (curtok p) then begin
       let d = parse_declaration p in
       let e2 =
-        match p.tok with
+        match curtok p with
         | Semi ->
           skip p;
           None
@@ -2062,7 +2093,7 @@ let rec parse_stmt p =
           Some e
       in
       let e3 =
-        match p.tok with
+        match curtok p with
         | RParen ->
           skip p;
           None
@@ -2075,7 +2106,7 @@ let rec parse_stmt p =
       S_For2 (d, e2, e3, s)
     end else begin
       let e1 =
-        match p.tok with
+        match curtok p with
         | Semi ->
           skip p;
           None
@@ -2085,7 +2116,7 @@ let rec parse_stmt p =
           Some e
       in
       let e2 =
-        match p.tok with
+        match curtok p with
         | Semi ->
           skip p;
           None
@@ -2095,7 +2126,7 @@ let rec parse_stmt p =
           Some e
       in
       let e3 =
-        match p.tok with
+        match curtok p with
         | RParen ->
           skip p;
           None
@@ -2107,17 +2138,14 @@ let rec parse_stmt p =
       let s = parse_stmt p in
       S_For1 (e1, e2, e3, s)
     end
-  | Ident name as saved_tok ->
-    let saved_pos = p.pos
-    and saved_pos_end = p.pos_end
-    and saved_last_end = p.last_end in
+  | Ident name ->
     (* Is this a label? *)
     skip p;
-    if p.tok = Colon then begin
+    if curtok p = Colon then begin
       skip p;
       S_Label (Ordinary_Label name, parse_stmt p)
     end else begin
-      ungetsym p (saved_tok, saved_pos, saved_pos_end, saved_last_end);
+      ungetsym p;
       let e = parse_expr p in
       expect p Semi;
       S_Expr e
@@ -2131,9 +2159,9 @@ and parse_block p =
   skip p; (* '{' *)
   push_scope p.env;
   let rec loop acc =
-    if p.tok = RBrace then (skip p; acc) else begin
+    if curtok p = RBrace then (skip p; acc) else begin
       let item =
-        if starts_type p.env p.tok then
+        if starts_type p.env (curtok p) then
           Item_Decl (parse_declaration p)
         else
           Item_Stmt (parse_stmt p)
@@ -2147,55 +2175,60 @@ and parse_block p =
 
 let parse_extern_decl p =
   let spec = parse_spec p in
-  let cv = make_cv spec
-  and typ = make_type spec in
-  if p.tok = Semi then (skip p; Decl []) else begin
-    let dr1 = parse_init_declarator p in
-    if p.tok = LBrace then begin
-      (* the init declarator should not contain an initializer *)
-      begin
-        match snd dr1 with
-        | None -> ()
-        | Some (Init_Expr { e_loc = loc; _ }) | Some (Init_List (_, loc)) ->
-          error p loc "no initializer allowed"
-      end;
-      (* and it should be a func. declarator *)
-      let param_decls : string option pdecl list =
-        match fst dr1 with
-        | (D_Func (_, p), _) -> p
-        | (_, loc) -> error p loc "function declarator expected"; []
+  if curtok p = Semi then (skip p; Decl []) else begin
+    let (d, init_opt) = parse_init_decl spec p in
+    match curtok p with
+    | Semi | Comma ->
+      let rec loop acc =
+        match curtok p with
+        | Semi -> skip p; acc
+        | Comma ->
+          skip p;
+          loop (parse_init_decl spec p :: acc)
+        | _ ->
+          error p (token_loc p.tok) "syntax error";
+          acc
       in
-      let d = make_decl' spec.storage cv typ (fst dr1) p in
+      Decl (List.rev (loop [(d, init_opt)]))
+    | _ ->
+      (* should be function dfinition *)
+      let ensure_no_init = function
+        | None -> ()
+        | Some (Init_Expr { tokens; _ } | Init_List { tokens; _ }) ->
+          error p (token_seq_loc tokens) "no initializer allowed"
+      in
+      (* the init declarator should not contain an initializer *)
+      ensure_no_init init_opt;
       (* take care of parameter declarations *)
       push_scope p.env;
-      param_decls |> List.iter begin fun d ->
-        match make_named_decl_opt d with
-        | None -> ()
-        | Some d' -> declare p.env d'
+      begin match d.d_declarator with
+        | { nodeval = D_Func (_, pdecls, _); _ } ->
+          pdecls |> List.iter begin fun pd ->
+            match make_named_decl_opt pd with
+            | None -> ()
+            | Some pd' -> declare p.env pd'
+          end
+        | { nodeval = D_Old_Func (_, pnames); _ } ->
+            let rec loop () =
+              if curtok p <> LBrace then begin
+                let idecls = parse_declaration p in
+                idecls |> List.iter begin fun (pd, init_opt) ->
+                  ensure_no_init init_opt;
+                  declare p.env pd
+                end;
+                loop ()
+              end
+            in loop ()
+        | { tokens; _ } ->
+          error p (token_seq_loc tokens) "function declarator expected"
       end;
       let block = parse_block p in
       pop_scope p.env;
       Func_Def (d, block)
-    end else begin
-      let rec loop acc =
-        match p.tok with
-        | Semi -> skip p; acc
-        | Comma ->
-          skip p;
-          loop (parse_init_declarator p :: acc)
-        | _ -> acc
-      in
-      Decl begin
-        loop [dr1] |> List.rev_map begin fun (dr, init) ->
-          let d = make_decl' spec.storage cv typ dr p in
-          (d, init)
-        end
-      end
-    end
   end
 
 let parse_translation_unit p =
   let rec loop acc =
-    if p.tok = EOF then acc else loop (parse_extern_decl p :: acc)
+    if curtok p = EOF then acc else loop (parse_extern_decl p :: acc)
   in
   loop [] |> List.rev

@@ -1,8 +1,8 @@
 type token =
   | EOF
   | PreIdent of string list (* no_expand_list *)
-  | TInt of string * bool * AST.int_size
-  | TFloat of string * AST.float_size
+  | TInt of string * bool * Type_Size.int_size
+  | TFloat of string * Type_Size.float_size
   | TChar of string
   | TString of string
   | Ellipsis
@@ -74,6 +74,7 @@ type token =
   | IF
   | INT
   | LONG
+  | RESTRICT
   | RETURN
   | SHORT
   | SIGNED
@@ -111,6 +112,7 @@ let keyword_map = [
   "if"          , IF ;
   "int"         , INT ;
   "long"        , LONG ;
+  "restrict"    , RESTRICT ;
   "return"      , RETURN ;
   "short"       , SHORT ;
   "signed"      , SIGNED ;

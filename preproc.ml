@@ -1,5 +1,5 @@
 open Token
-open AST_Types
+open Type_Size
 
 module H =
   Hashtbl.Make(struct
@@ -14,6 +14,10 @@ type token' = {
   pos : Lexing.position;
   ws : string (* preceding whitespace *)
 }
+
+let token_end_pos tok =
+  { tok.pos with
+    pos_cnum = tok.pos.pos_cnum + String.length tok.text }
 
 type replace_token =
   | Verbatim of token'
@@ -55,8 +59,7 @@ let init_state input_chan filename =
   let macro_tab =
     let r kind text =
       Verbatim { kind; text; ws = ""; pos = Lexing.dummy_pos }
-    in
-    [
+    in [
       "__FILE__", ObjLike [Magic_FILE];
       "__LINE__", ObjLike [Magic_LINE];
       "__STDC__", ObjLike [r (TInt ("1", true, Size_Int)) "1"];
@@ -120,12 +123,12 @@ let report_error pos msg =
 
 let unexpected_token pos = error pos "unexpected token"
 
+let pp_token f t =
+  Format.pp_print_string f t.ws;
+  Format.pp_print_string f t.text
+
 let pp_token_list f l =
-  let open Format in
-  l |> List.iter begin fun t ->
-    pp_print_string f t.ws;
-    pp_print_string f t.text
-  end
+  l |> List.iter (pp_token f)
 
 (* token stream *)
 type parser = {
@@ -290,9 +293,10 @@ let rec subst_token (macro_name, noexp, pos, ws as token_info)
 
 let rec find_include_file search_path filename =
   match search_path with
-  | [] -> None
+  | [] -> Printf.eprintf "%s not found\n" filename; None
   | hd :: tl ->
     let path = hd ^ filename in
+    Printf.eprintf "trying %s\n" path;
     if Sys.file_exists path then Some path else
       find_include_file tl filename
 
@@ -623,6 +627,8 @@ let handle_elif st p =
 let handle_define st p =
   skip p;
   let name = expect_ident p in
+  let pos = st.lexbuf.lex_curr_p in
+  Printf.eprintf "%s:%d: #define %s\n" pos.pos_fname pos.pos_lnum name;
   let def =
     match p.tok with
     | { kind = LParen; ws = ""; _ } ->
@@ -726,6 +732,8 @@ let handle_directive st (pos : Lexing.position) dir =
       | "undef" ->
         skip p;
         let name = expect_ident p in
+        let pos = st.lexbuf.lex_curr_p in
+        Printf.eprintf "%s:%d: #undef %s\n" pos.pos_fname pos.pos_lnum name;
         expect_eof p;
         H.remove st.macro_tab name
       | "ifdef" ->
@@ -823,14 +831,4 @@ let make_supplier ic filename =
   fun () ->
     let token = getsym_expand st.macro_tab p in
 (*     Format.printf "%d: %a ‘%s’\n" token.pos pp_pptoken token.kind token.text; *)
-    let start_pos = token.pos in
-    let end_pos =
-      { start_pos with
-        pos_cnum = start_pos.pos_cnum + String.length token.text }
-    in
-    let token' = convert_token token.kind token.text in
-    (* let line = start_pos.pos_lnum in
-    let col = start_pos.pos_cnum - start_pos.pos_bol in *)
-    (* Format.printf "%d:%d: %a ‘%s’\n"
-      line col pp_pptoken token.kind token.text; *)
-    token', start_pos, end_pos
+    { token with kind = convert_token token.kind token.text }
