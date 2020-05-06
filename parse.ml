@@ -1,5 +1,8 @@
 module P = Parser
 
+open AST
+open Dump_AST
+
 let config =
   AST.{
     short_size = 2;
@@ -26,7 +29,8 @@ let parse_c_file ic filename =
 let () =
   try
     let tu = parse_c_file stdin "<stdin>" in
-    tu |> List.iter (Format.printf "%a@." AST.pp_extern_decl)
+    tu |> List.iter (Format.printf "%a@." AST.pp_extern_decl);
+    Format.printf "%a@." dump_tu tu
   with P.Syntax_Error tok ->
     Format.eprintf "%a: syntax error at ‘%s’@."
       Preproc.pp_pos tok.pos tok.text

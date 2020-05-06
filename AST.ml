@@ -1,5 +1,3 @@
-(* not-so-abstract syntax tree *)
-
 open ExtLib
 open Type_Size
 
@@ -53,7 +51,7 @@ let pp_token_seq f = function
   | Empty _ -> ()
   | Nonempty r -> pp_rope Preproc.pp_token f r
 
-let pp_node _ f node = pp_token_seq f node.tokens
+let pp_node f node = pp_token_seq f node.tokens
 
 type cv = bool * bool
 
@@ -71,6 +69,7 @@ let cv_is_volatile cv = snd cv
 let mk_cv c v = (c, v)
 
 type storage = Typedef | Extern | Static
+[@@deriving show { with_path = false }]
 
 type typ =
   | Void
@@ -86,7 +85,7 @@ type typ =
 
 and func_type = {
   return_type : typ;
-  param_types_opt : (typ list * bool) option
+  param_types_opt : (typ list * bool(*vararg*)) option
 }
 
 let pp_cv f (c,v) =
@@ -218,7 +217,6 @@ type lit =
   | FloatLit of string
   | CharLit of string
   | StringLit of string
-[@@deriving show { with_path = false }]
 
 type inc_dec_op =
   | PostInc
@@ -308,7 +306,6 @@ type assign_op =
   | XorAssign
   | OrAssign
   | Seq
-[@@deriving show { with_path = false }]
 
 type binary_op' =
   | MulI of int_size * bool
@@ -462,12 +459,17 @@ let binop_of_assign_op = function
   | OrAssign     -> Or
   | _ -> assert false
 
+type scope = Local | Global
+[@@deriving show { with_path = false }]
+
 type obj = {
   name : string;
   typ : typ;
   storage : storage option;
   value : int64 option;
-  cv : cv
+  cv : cv;
+  scope : scope;
+  id : int
 }
 
 let pp_pdecl' pp_name f (storage, cv, typ, name) =
@@ -517,15 +519,12 @@ type expr_kind =
   | E_Dot of expr node * string * int option * cv
   | E_Arrow of expr node * string * int option * cv
   | E_Index of expr node * expr node * cv
-  | E_Conv of expr node
 
 and expr = {
   e_kind : expr_kind;
   e_type_opt : typ option;
   e_value : int64 option
 }
-
-[@@deriving show { with_path = false }]
 
 type 'a declarator =
   | D_Base of 'a
@@ -584,8 +583,6 @@ let make_named_decl_opt { d_storage; d_cv; d_type; d_name; d_declarator } =
       d_name = name;
       d_declarator = make_named_declarator d_declarator }
 
-[@@deriving show { with_path = false }]
-
 let has_type e =
   e.e_type_opt <> None
 
@@ -599,14 +596,15 @@ type init =
   | Init_Expr of expr node
   | Init_List of init list node
 
-type init_decl = decl * init option
+type init_decl = decl * (obj * init) option
 
-let obj_of_decl d =
+let obj_of_decl (scope, id) d =
   { name = d.d_name;
     typ = d.d_type;
     storage = d.d_storage;
     value = None;
-    cv = d.d_cv }
+    cv = d.d_cv;
+    scope; id }
 
 let pp_pdecl pp_name f d =
   pp_pdecl' pp_name f (d.d_storage, d.d_cv, d.d_type, d.d_name)
@@ -632,8 +630,8 @@ let pp_init_decl f (d, init_opt) =
   pp_decl f d;
   match init_opt with
   | None -> ()
-  | Some (Init_Expr { tokens; _ } | Init_List { tokens; _ }) ->
-    Format.fprintf f " = %a" pp_token_seq tokens
+  | Some (_, (Init_Expr { tokens; _ } | Init_List { tokens; _ })) ->
+    Format.fprintf f " =%a" pp_token_seq tokens
 
 type struct_union_def = decl array
 
@@ -641,37 +639,40 @@ type label =
   | Ordinary_Label of string
   | Case_Label of expr node
   | Default_Label
-[@@deriving show { with_path = false }]
 
 type stmt =
   | S_Null
-  | S_Label of label * stmt
+  | S_Label of label * stmt node
   | S_Comp of block
   | S_Expr of expr node
-  | S_If of expr node * stmt
-  | S_IfElse of expr node * stmt * stmt
-  | S_Switch of expr node * stmt
-  | S_While of expr node * stmt
-  | S_DoWhile of stmt * expr node
-  | S_For1 of expr node option * expr node option * expr node option * stmt
-  | S_For2 of init_decl list * expr node option * expr node option * stmt
-  | S_Goto of string
+  | S_If of expr node * stmt node
+  | S_IfElse of expr node * stmt node * stmt node
+  | S_Switch of expr node * stmt node
+  | S_While of expr node * stmt node
+  | S_DoWhile of stmt node * expr node
+  | S_For1 of expr node option * expr node option * expr node option * stmt node
+  | S_For2 of init_decl list * expr node option * expr node option * stmt node
+  | S_Goto of string (* should we resolve label name? *)
   | S_Continue
   | S_Break
   | S_Return of expr node option
 
 and block_item =
   | Item_Decl of init_decl list
-  | Item_Stmt of stmt
+  | Item_Stmt of stmt node
 
 and block = block_item list
 
-[@@deriving show { with_path = false }]
+let pp_block_item f = function
+  | Item_Decl idecls -> List.iter (Format.fprintf f "%a;" pp_init_decl) idecls
+  | Item_Stmt node -> pp_node f node
+
+let pp_block f items = List.iter (pp_block_item f) items
 
 let pp_func_type f ft =
   pp_typ f (Func ft)
 
 type extern_decl =
-  | Func_Def of decl * block
+  | Func_Def of decl * block * obj list (* locals *)
   | Decl of init_decl list
 [@@deriving show { with_path = false }]

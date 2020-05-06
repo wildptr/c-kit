@@ -41,7 +41,11 @@ type env = {
   tag_table : tag H.t;
   typedef_table : (typ * cv) H.t;
   mutable ident_stack : ident_set list;
-  su_table : su_info DynArray.t
+  su_table : su_info DynArray.t;
+  mutable global_id : int;
+  mutable local_id : int;
+  mutable global_objects_rev : obj list;
+  mutable local_objects_rev : obj list
 }
 
 let new_env () = {
@@ -49,8 +53,19 @@ let new_env () = {
   tag_table = H.create 64;
   typedef_table = H.create 64;
   ident_stack = [new_ident_set ()];
-  su_table = DynArray.create ()
+  su_table = DynArray.create ();
+  global_id = 0;
+  local_id = 0;
+  global_objects_rev = [];
+  local_objects_rev = []
 }
+
+let is_in_global_scope env =
+  List.tl env.ident_stack = []
+
+let gen_id env =
+  if is_in_global_scope env then (Global, let i = env.global_id in env.global_id <- i+1; i)
+  else (Local, let i = env.local_id in env.local_id <- i+1; i)
 
 let is_typedef_name env name =
   H.mem env.typedef_table name
@@ -153,7 +168,10 @@ let declare_object env (obj : obj) =
   let name = obj.name in
   H.add env.obj_table name obj;
   let idents = List.hd env.ident_stack in
-  Stack.push name idents.objects
+  Stack.push name idents.objects;
+  match obj.scope with
+  | Global -> env.global_objects_rev <- obj :: env.global_objects_rev
+  | Local -> env.local_objects_rev <- obj :: env.local_objects_rev
 
 let declare_tag env name tag =
   H.add env.tag_table name tag;
@@ -166,12 +184,14 @@ let declare_typedef env name qtyp =
   Stack.push name idents.typedefs
 
 let define_constant env name typ value =
+  let (scope, id) = gen_id env in
   let obj = {
     name;
     typ;
     storage = None; (* TODO: or rather Constant? *)
     value = Some value;
-    cv = no_cv
+    cv = no_cv;
+    scope; id
   } in
   declare_object env obj
 
@@ -183,7 +203,7 @@ let pop_scope env =
   | [] -> assert false
   | { objects; tags; typedefs } :: tl ->
     (* remove all identifiers in current scope from symbol table *)
-    objects |> Stack.iter (H.remove env.obj_table);
+    objects |> Stack.iter (H.remove env.tag_table);
     tags |> Stack.iter (H.remove env.tag_table);
     typedefs |> Stack.iter (H.remove env.typedef_table);
     env.ident_stack <- tl
@@ -194,7 +214,7 @@ let declare env (d : decl) =
       pp_loc (token_seq_loc d.d_declarator.tokens) d.d_name
       pp_typ_cv (d.d_type, d.d_cv);
     declare_typedef env d.d_name (d.d_type, d.d_cv)
-  end  else declare_object env (obj_of_decl d)
+  end else declare_object env (obj_of_decl (gen_id env) d)
 
 let make_parser' config supplier filename =
   let tok = supplier () in
@@ -359,7 +379,6 @@ let lvalue_status = function
   | E_Dot (_, _, _, cv) -> Some cv
   | E_Arrow (_, _, _, cv) -> Some cv
   | E_Index (_, _, cv) -> Some cv
-  | E_Conv _ -> None
 
 let get_cv e =
   Option.default no_cv (lvalue_status e.e_kind)
@@ -1710,13 +1729,22 @@ and parse_initializer p =
   end else Init_Expr (parse_assign_expr p)
 
 (* actually enters the declared symbol nto symbol table *)
-and parse_init_decl spec p =
+and parse_init_decl spec p : init_decl =
   let d = make_decl spec (parse_named_declarator p) p in
-  declare p.env d;
+  let obj = obj_of_decl (gen_id p.env) d in
+  declare_object p.env obj;
   match curtok p with
   | Token.Eq ->
     skip p;
-    (d, Some (parse_initializer p))
+    let init = parse_initializer p in
+    (* storage should not be typedef *)
+    if d.d_storage = Some Typedef then begin
+      let loc =
+        match init with Init_Expr {tokens;_} | Init_List {tokens;_} ->
+          token_seq_loc tokens
+      in error p loc "typedef initialized"
+    end;
+    (d, Some (obj, init))
   | _ ->
     (d, None)
 
@@ -1960,10 +1988,8 @@ and parse_decl p : string option pdecl =
 (* consumes terminating semicolon *)
 and parse_declaration p : init_decl list =
   let spec = parse_spec p in
-  if curtok p = Semi then begin
-    skip p;
-    []
-  end else begin
+  if curtok p = Semi then (skip p; [])
+  else begin
     let collect acc = parse_init_decl spec p :: acc in
     let rec loop acc =
       match curtok p with
@@ -2004,71 +2030,88 @@ and parse_type_name p =
 let rec parse_stmt p =
   match curtok p with
   | CASE ->
+    start_node p;
     skip p;
     let case_expr = parse_constant_expr p in
     expect p Colon;
-    S_Label (Case_Label case_expr, parse_stmt p)
+    let s = parse_stmt p in
+    mk_node (S_Label (Case_Label case_expr, s)) (end_node p)
   | DEFAULT ->
+    start_node p;
     skip p;
     expect p Colon;
-    S_Label (Default_Label, parse_stmt p)
+    let s = parse_stmt p in
+    mk_node (S_Label (Default_Label, s)) (end_node p)
   | Semi ->
-    skip p;
-    S_Null
+    let ts = skip' p in
+    mk_node S_Null ts
   | LBrace ->
-    S_Comp (parse_block p)
+    start_node p;
+    let b = parse_block p in
+    mk_node (S_Comp b) (end_node p)
   | GOTO ->
+    start_node p;
     skip p;
     let label = expect_ident p in
     expect p Semi;
-    S_Goto label
+    mk_node (S_Goto label) (end_node p)
   | CONTINUE ->
+    start_node p;
     skip p;
     expect p Semi;
-    S_Continue
+    mk_node S_Continue (end_node p)
   | BREAK ->
+    start_node p;
     skip p;
     expect p Semi;
-    S_Break
+    mk_node S_Break (end_node p)
   | RETURN ->
+    start_node p;
     skip p;
-    if curtok p = Semi then begin
-      skip p;
-      S_Return None
-    end else begin
-      let e = parse_expr p in
-      expect p Semi;
-      S_Return (Some e)
-    end
+    let nodeval =
+      if curtok p = Semi then begin
+        skip p;
+        S_Return None
+      end else begin
+        let e = parse_expr p in
+        expect p Semi;
+        S_Return (Some e)
+      end
+    in mk_node nodeval (end_node p)
   | IF ->
+    start_node p;
     skip p;
     expect p LParen;
     let e = parse_expr p in
     expect p RParen;
     let s1 = parse_stmt p in
-    begin match curtok p with
+    let nodeval =
+      match curtok p with
       | ELSE ->
         skip p;
         let s2 = parse_stmt p in
         S_IfElse (e, s1, s2)
       | _ ->
         S_If (e, s1)
-    end
+    in mk_node nodeval (end_node p)
   | SWITCH ->
+    start_node p;
     skip p;
     expect p LParen;
     let e = parse_expr p in
     expect p RParen;
     let s = parse_stmt p in
-    S_Switch (e, s)
+    mk_node (S_Switch (e, s)) (end_node p)
   | WHILE ->
+    start_node p;
     skip p;
     expect p LParen;
     let e = parse_expr p in
     expect p RParen;
     let s = parse_stmt p in
-    S_While (e, s)
+    mk_node (S_While (e, s)) (end_node p)
   | DO ->
+    start_node p;
     skip p;
     let s = parse_stmt p in
     expect p WHILE;
@@ -2076,84 +2119,91 @@ let rec parse_stmt p =
     let e = parse_expr p in
     expect p RParen;
     expect p Semi;
-    S_DoWhile (s, e)
+    mk_node (S_DoWhile (s, e)) (end_node p)
   | FOR ->
+    start_node p;
     skip p;
     expect p LParen;
-    if starts_type p.env (curtok p) then begin
-      let d = parse_declaration p in
-      let e2 =
-        match curtok p with
-        | Semi ->
-          skip p;
-          None
-        | _ ->
-          let e = parse_expr p in
-          expect p Semi;
-          Some e
-      in
-      let e3 =
-        match curtok p with
-        | RParen ->
-          skip p;
-          None
-        | _ ->
-          let e = parse_expr p in
-          expect p RParen;
-          Some e
-      in
-      let s = parse_stmt p in
-      S_For2 (d, e2, e3, s)
-    end else begin
-      let e1 =
-        match curtok p with
-        | Semi ->
-          skip p;
-          None
-        | _ ->
-          let e = parse_expr p in
-          expect p Semi;
-          Some e
-      in
-      let e2 =
-        match curtok p with
-        | Semi ->
-          skip p;
-          None
-        | _ ->
-          let e = parse_expr p in
-          expect p Semi;
-          Some e
-      in
-      let e3 =
-        match curtok p with
-        | RParen ->
-          skip p;
-          None
-        | _ ->
-          let e = parse_expr p in
-          expect p RParen;
-          Some e
-      in
-      let s = parse_stmt p in
-      S_For1 (e1, e2, e3, s)
-    end
+    let nodeval =
+      if starts_type p.env (curtok p) then begin
+        let d = parse_declaration p in
+        let e2 =
+          match curtok p with
+          | Semi ->
+            skip p;
+            None
+          | _ ->
+            let e = parse_expr p in
+            expect p Semi;
+            Some e
+        in
+        let e3 =
+          match curtok p with
+          | RParen ->
+            skip p;
+            None
+          | _ ->
+            let e = parse_expr p in
+            expect p RParen;
+            Some e
+        in
+        let s = parse_stmt p in
+        S_For2 (d, e2, e3, s)
+      end else begin
+        let e1 =
+          match curtok p with
+          | Semi ->
+            skip p;
+            None
+          | _ ->
+            let e = parse_expr p in
+            expect p Semi;
+            Some e
+        in
+        let e2 =
+          match curtok p with
+          | Semi ->
+            skip p;
+            None
+          | _ ->
+            let e = parse_expr p in
+            expect p Semi;
+            Some e
+        in
+        let e3 =
+          match curtok p with
+          | RParen ->
+            skip p;
+            None
+          | _ ->
+            let e = parse_expr p in
+            expect p RParen;
+            Some e
+        in
+        let s = parse_stmt p in
+        S_For1 (e1, e2, e3, s)
+      end
+    in mk_node nodeval (end_node p)
   | Ident name ->
     (* Is this a label? *)
+    start_node p;
     skip p;
-    if curtok p = Colon then begin
-      skip p;
-      S_Label (Ordinary_Label name, parse_stmt p)
-    end else begin
-      ungetsym p;
-      let e = parse_expr p in
-      expect p Semi;
-      S_Expr e
-    end
+    let nodeval =
+      if curtok p = Colon then begin
+        skip p;
+        S_Label (Ordinary_Label name, parse_stmt p)
+      end else begin
+        ungetsym p;
+        let e = parse_expr p in
+        expect p Semi;
+        S_Expr e
+      end
+    in mk_node nodeval (end_node p)
   | _ ->
+    start_node p;
     let e = parse_expr p in
     expect p Semi;
-    S_Expr e
+    mk_node (S_Expr e) (end_node p)
 
 and parse_block p =
   skip p; (* '{' *)
@@ -2194,7 +2244,7 @@ let parse_extern_decl p =
       (* should be function dfinition *)
       let ensure_no_init = function
         | None -> ()
-        | Some (Init_Expr { tokens; _ } | Init_List { tokens; _ }) ->
+        | Some (_, (Init_Expr { tokens; _ } | Init_List { tokens; _ })) ->
           error p (token_seq_loc tokens) "no initializer allowed"
       in
       (* the init declarator should not contain an initializer *)
@@ -2209,22 +2259,25 @@ let parse_extern_decl p =
             | Some pd' -> declare p.env pd'
           end
         | { nodeval = D_Old_Func (_, pnames); _ } ->
-            let rec loop () =
-              if curtok p <> LBrace then begin
-                let idecls = parse_declaration p in
-                idecls |> List.iter begin fun (pd, init_opt) ->
-                  ensure_no_init init_opt;
-                  declare p.env pd
-                end;
-                loop ()
-              end
-            in loop ()
+          let rec loop () =
+            if curtok p <> LBrace then begin
+              let idecls = parse_declaration p in
+              idecls |> List.iter begin fun (pd, init_opt) ->
+                ensure_no_init init_opt;
+                declare p.env pd
+              end;
+              loop ()
+            end
+          in loop ()
         | { tokens; _ } ->
           error p (token_seq_loc tokens) "function declarator expected"
       end;
       let block = parse_block p in
       pop_scope p.env;
-      Func_Def (d, block)
+      let locals = List.rev p.env.local_objects_rev in
+      p.env.local_id <- 0;
+      p.env.local_objects_rev <- [];
+      Func_Def (d, block, locals)
   end
 
 let parse_translation_unit p =

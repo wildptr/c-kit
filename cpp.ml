@@ -1,3 +1,4 @@
+(* NOT suitable for use as a standalone C preprocessor *)
 open Preproc
 
 let clear_ws s =
