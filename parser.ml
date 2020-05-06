@@ -1744,9 +1744,9 @@ and parse_init_decl spec p : init_decl =
           token_seq_loc tokens
       in error p loc "typedef initialized"
     end;
-    (d, Some (obj, init))
+    (d, obj, Some init)
   | _ ->
-    (d, None)
+    (d, obj, None)
 
 and try_parse_declarator p =
   match curtok p with
@@ -2226,7 +2226,7 @@ and parse_block p =
 let parse_extern_decl p =
   let spec = parse_spec p in
   if curtok p = Semi then (skip p; Decl []) else begin
-    let (d, init_opt) = parse_init_decl spec p in
+    let (d, obj, init_opt) = parse_init_decl spec p in
     match curtok p with
     | Semi | Comma ->
       let rec loop acc =
@@ -2239,12 +2239,12 @@ let parse_extern_decl p =
           error p (token_loc p.tok) "syntax error";
           acc
       in
-      Decl (List.rev (loop [(d, init_opt)]))
+      Decl (List.rev (loop [(d, obj, init_opt)]))
     | _ ->
       (* should be function dfinition *)
       let ensure_no_init = function
         | None -> ()
-        | Some (_, (Init_Expr { tokens; _ } | Init_List { tokens; _ })) ->
+        | Some (Init_Expr { tokens; _ } | Init_List { tokens; _ }) ->
           error p (token_seq_loc tokens) "no initializer allowed"
       in
       (* the init declarator should not contain an initializer *)
@@ -2262,7 +2262,7 @@ let parse_extern_decl p =
           let rec loop () =
             if curtok p <> LBrace then begin
               let idecls = parse_declaration p in
-              idecls |> List.iter begin fun (pd, init_opt) ->
+              idecls |> List.iter begin fun (pd, _, init_opt) ->
                 ensure_no_init init_opt;
                 declare p.env pd
               end;

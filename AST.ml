@@ -596,7 +596,7 @@ type init =
   | Init_Expr of expr node
   | Init_List of init list node
 
-type init_decl = decl * (obj * init) option
+type init_decl = decl * obj * init option
 
 let obj_of_decl (scope, id) d =
   { name = d.d_name;
@@ -626,11 +626,11 @@ let pp_decl f d = pp_pdecl Format.pp_print_string f d
     end;
     pp_print_string f " }"*)
 
-let pp_init_decl f (d, init_opt) =
+let pp_init_decl f ((d, _, init_opt) : init_decl) =
   pp_decl f d;
   match init_opt with
   | None -> ()
-  | Some (_, (Init_Expr { tokens; _ } | Init_List { tokens; _ })) ->
+  | Some (Init_Expr { tokens; _ } | Init_List { tokens; _ }) ->
     Format.fprintf f " =%a" pp_token_seq tokens
 
 type struct_union_def = decl array
@@ -656,6 +656,7 @@ type stmt =
   | S_Continue
   | S_Break
   | S_Return of expr node option
+  | S_Init of obj * init
 
 and block_item =
   | Item_Decl of init_decl list

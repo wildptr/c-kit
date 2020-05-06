@@ -126,6 +126,21 @@ let dump_init_decl f = function
   | (d, Some ((obj:obj), init)) ->
     fprintf f "(Init %s %d %a)" (show_scope obj.scope) obj.id dump_init init
 
+let convert_block_item = function
+  | Item_Decl idecls ->
+    List.fold_left begin fun acc idecl ->
+      match idecl with
+      | (_, _, None) -> acc
+      | (_, obj, Some init) ->
+        let ts =
+          match init with Init_Expr {tokens;_} | Init_List {tokens;_} -> tokens
+        in mk_node (S_Init (obj, init)) ts :: acc
+    end [] idecls |> List.rev
+  | Item_Stmt s -> [s]
+
+let convert_block b =
+  List.map convert_block_item b |> List.concat
+
 let rec dump_stmt f node =
   match node.nodeval with
   | S_Null ->
@@ -133,7 +148,7 @@ let rec dump_stmt f node =
   | S_Label (label, s) ->
     fprintf f "(Label %a %a)" dump_label label dump_stmt s
   | S_Comp b ->
-    dump_list dump_block_item f b
+    fprintf f "(Block %a)" dump_block b
   | S_Expr e ->
     fprintf f "(Expr %a)" dump_expr e
   | S_If (e, s) ->
@@ -165,12 +180,12 @@ let rec dump_stmt f node =
     pp_print_string f "Break"
   | S_Return eO ->
     fprintf f "(Return %a)" (dump_option dump_expr) eO
+  | S_Init (obj, init) ->
+    fprintf f "(Init %s %d %a)" (show_scope obj.scope) obj.id
+      dump_init init
 
-and dump_block_item f = function
-  | Item_Decl idecls ->
-    fprintf f "(Init %a)" (dump_list dump_init_decl) idecls
-  | Item_Stmt s ->
-    fprintf f "(Stmt %a)" dump_stmt s
+and dump_block f b =
+  dump_list dump_stmt f (convert_block b)
 
 let dump_obj f (obj:obj) =
   fprintf f "{id=%d, name=%a, type=%a, storage=%a, cv=%a}" obj.id
@@ -179,11 +194,27 @@ let dump_obj f (obj:obj) =
     (dump_option pp_storage) obj.storage
     dump_cv obj.cv
 
-let dump_extern_decl f = function
-  | Func_Def (_,  b, objs) ->
-    fprintf f "(Func_Def %a %a)" (dump_list dump_obj) objs
-      (dump_list dump_block_item) b
-  | Decl idecls ->
-    fprintf f "(Init %a)" (dump_list dump_init_decl) idecls
-
-let dump_tu f tu = dump_list dump_extern_decl f tu
+let dump_tu f tu =
+  let objs_rev, funcs_rev =
+    List.fold_left begin fun (objs, funcs) ed ->
+      match ed with
+      | Func_Def (decl, block, fobjs) -> (objs, (decl, block, fobjs) :: funcs)
+      | Decl idecls ->
+        let objs' =
+          List.fold_left (fun acc (_, obj, initO) -> (obj, initO) :: acc) objs idecls
+        in (objs', funcs)
+    end ([], []) tu
+  in
+  let objs = List.rev objs_rev
+  and funcs = List.rev funcs_rev in
+  let dump_obj f (obj, initO) =
+    fprintf f "(%a, %a)" dump_obj obj (dump_option dump_init) initO
+  and dump_func f (decl, block, objs) =
+    fprintf f "{name=%a, type=%a, objects=%a, body=%a}"
+      pp_escaped_string decl.d_name
+      dump_type decl.d_type
+      (dump_list dump_obj) objs
+      dump_block block
+  in
+  fprintf f "{objects=%a, functions=%a}"
+    (dump_list dump_obj) objs (dump_list dump_func) funcs
