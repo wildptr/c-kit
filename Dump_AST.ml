@@ -121,21 +121,18 @@ let rec dump_init f = function
   | Init_List il_node ->
     fprintf f "(Init %a)" (dump_list dump_init) il_node.nodeval
 
-let dump_init_decl f = function
-  | (_, None) -> ()
-  | (d, Some ((obj:obj), init)) ->
-    fprintf f "(Init %s %d %a)" (show_scope obj.scope) obj.id dump_init init
+let convert_init_decls idecls =
+  List.fold_left begin fun acc idecl ->
+    match idecl with
+    | (_, _, None) -> acc
+    | (_, obj, Some init) ->
+      let ts =
+        match init with Init_Expr {tokens;_} | Init_List {tokens;_} -> tokens
+      in mk_node (S_Init (obj, init)) ts :: acc
+  end [] idecls |> List.rev
 
 let convert_block_item = function
-  | Item_Decl idecls ->
-    List.fold_left begin fun acc idecl ->
-      match idecl with
-      | (_, _, None) -> acc
-      | (_, obj, Some init) ->
-        let ts =
-          match init with Init_Expr {tokens;_} | Init_List {tokens;_} -> tokens
-        in mk_node (S_Init (obj, init)) ts :: acc
-    end [] idecls |> List.rev
+  | Item_Decl idecls -> convert_init_decls idecls
   | Item_Stmt s -> [s]
 
 let convert_block b =
@@ -167,8 +164,9 @@ let rec dump_stmt f node =
       (dump_option dump_expr) e2O
       (dump_option dump_expr) e3O
       dump_stmt s
-  | S_For2 (_, e1O, e2O, s) ->
-    fprintf f "(For2 %a %a %a)"
+  | S_For2 (idecls, e1O, e2O, s) ->
+    fprintf f "(For2 %a %a %a %a)"
+      (dump_list dump_stmt) (convert_init_decls idecls)
       (dump_option dump_expr) e1O
       (dump_option dump_expr) e2O
       dump_stmt s
@@ -181,7 +179,7 @@ let rec dump_stmt f node =
   | S_Return eO ->
     fprintf f "(Return %a)" (dump_option dump_expr) eO
   | S_Init (obj, init) ->
-    fprintf f "(Init %s %d %a)" (show_scope obj.scope) obj.id
+    fprintf f "(Init %d %a)" (*show_scope obj.scope*) obj.id
       dump_init init
 
 and dump_block f b =

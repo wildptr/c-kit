@@ -71,6 +71,7 @@ let mk_cv c v = (c, v)
 type storage = Typedef | Extern | Static
 [@@deriving show { with_path = false }]
 
+(* TODO: implement restrict qualifier for pointers *)
 type typ =
   | Void
   | Int of int_size * bool
