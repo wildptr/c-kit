@@ -1,0 +1,9 @@
+(executable
+  (name parse)
+  (modes byte exe)
+  (libraries extlib)
+  (preprocess (pps ppx_deriving.std)))
+(ocamllex lexer)
+(env
+ (dev
+  (flags (:standard -g -w -27))))

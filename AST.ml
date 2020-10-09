@@ -1,4 +1,3 @@
-open ExtLib
 open Type_Size
 
 type 'a rope =

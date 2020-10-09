@@ -51,7 +51,12 @@ type state = {
   max_include_depth : int
 }
 
-let init_state input_chan filename =
+type config = {
+  sys_include_dirs : string list;
+  user_include_dirs : string list
+}
+
+let init_state conf input_chan filename =
   let lexbuf = Lexing.from_channel input_chan in
   lexbuf.lex_curr_p <-
     { lexbuf.lex_curr_p with
@@ -71,8 +76,8 @@ let init_state input_chan filename =
     include_stack = [];
     macro_tab;
     cond_stack = [];
-    sys_include_dirs = ["/usr/local/include/"; "/usr/include/"];
-    user_include_dirs = [""];
+    sys_include_dirs = conf.sys_include_dirs;
+    user_include_dirs = conf.user_include_dirs;
     input_chan;
     max_include_depth = 16 }
 
@@ -464,7 +469,7 @@ let subject_to_expansion macro_tab p text noexp =
 let make_parser next =
   { next; tok = next (); tokq = [] }
 
-let rec parse_macro_body param_alist p =
+let parse_macro_body param_alist p =
   let parse_simple () =
     match getsym p with
     | { kind = PreIdent _; text = name; _ } as t ->
@@ -588,7 +593,7 @@ let make_cond_expander macro_tab p =
       in
       let text = if H.mem macro_tab name then "1" else "0" in
       { t with kind = TInt (text, true, Size_Int); text }
-    | { kind = PreIdent _ } as t ->
+    | { kind = PreIdent _; _ } as t ->
       { t with kind = TInt ("0", true, Size_Int); text = "0" }
     | t -> t
   end
@@ -666,7 +671,7 @@ let handle_define st p =
       in
       let body = parse_macro_body param_alist' p in
       FunLike (arity, is_vararg, body)
-    | t ->
+    | _ ->
       (* object-like macro *)
       let body = parse_macro_body [] p in
       ObjLike body
@@ -677,7 +682,7 @@ let unget_lexeme (lexbuf : Lexing.lexbuf) =
   lexbuf.lex_curr_pos <- lexbuf.lex_start_pos;
   lexbuf.lex_curr_p <- lexbuf.lex_start_p
 
-let handle_include st p lexbuf =
+let handle_include (st:state) p lexbuf =
   let parse lexbuf =
     let search_path =
       match Lexer.include_file lexbuf with
@@ -825,8 +830,8 @@ let make_preproc_parser st =
   in
   make_parser next
 
-let make_supplier ic filename =
-  let st = init_state ic filename in
+let make_supplier conf ic filename =
+  let st = init_state conf ic filename in
   let p = make_preproc_parser st in
   fun () ->
     let token = getsym_expand st.macro_tab p in

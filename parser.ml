@@ -3,8 +3,8 @@
    representation of the program. *)
 
 open Token
-open AST
 open ExtLib
+open AST
 open Type_Size
 
 module H =
@@ -227,9 +227,9 @@ let make_parser' config supplier filename =
     messages = Stack.create ();
     config }
 
-let make_parser config ic filename =
-  let supplier = Preproc.make_supplier ic filename in
-  make_parser' config supplier filename
+let make_parser (preproc_config, lang_config) ic filename =
+  let supplier = Preproc.make_supplier preproc_config ic filename in
+  make_parser' lang_config supplier filename
 
 (*let make_supplier_from_string s =
   let lexbuf = Lexing.from_string s in
