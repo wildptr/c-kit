@@ -1,34 +1,35 @@
-module P = Parser
+module P = Auto_parser
 
-open Dump_AST
-
-let config =
-  AST.{
-    short_size = 2;
-    int_size = 4;
-    long_size = 4;
-    long_long_size = 8;
-    word_size = Type_Size.Size_Long
-  }
+(*let abs_pos (pos:Lexing.position) =
+  pos.pos_bol + pos.pos_cnum*)
 
 let parse_c_file preproc_conf ic filename =
-  (* why do I have to specify filename twice?? *)
-  let p = P.make_parser' config (Preproc.make_supplier preproc_conf ic filename) filename in
-  let result = P.parse_translation_unit p in
-  P.get_messages p |> List.iter begin fun (loc, msgtype, msg) ->
-    let msgtype_name =
-      match msgtype with
-      | P.Error -> "error"
-      | Warning -> "warning"
-    in
-    Format.eprintf "%a: %s: %s@." AST.pp_loc loc msgtype_name msg
-  end;
-  result
+  let supplier = Preproc.make_supplier preproc_conf ic filename in
+  let menhir_supplier () =
+    let tok:Preproc.token' = supplier () in
+    let pos0 = tok.pos in
+    let pos1 = { pos0 with Lexing.pos_cnum = pos0.pos_cnum + String.length tok.text } in
+    (tok.kind, pos0, pos1)
+  in
+  let init_pos =
+    Lexing.
+      { pos_fname = filename;
+        pos_lnum = 1;
+        pos_bol = 0;
+        pos_cnum = 0 }
+  in
+  let init_checkpoint = P.Incremental.top init_pos in
+  P.MenhirInterpreter.loop menhir_supplier init_checkpoint
+
+let append_slash_if_needed path =
+  let len = String.length path in
+  if len = 0 || path.[len-1] = '/' then path else path^"/"
 
 let () =
   let sys_inc_rev = ref []
   and user_inc_rev = ref []
   and input_file = ref None in
+
   let argc = Array.length Sys.argv in
   let rec parse_argv i =
     if i = argc then i
@@ -48,23 +49,21 @@ let () =
           parse_argv (i+1)
       else i
   in
+
   let optind = parse_argv 1 in
   if optind < argc then input_file := Some (Sys.argv.(optind));
   let input_file = !input_file in
   let preproc_conf : Preproc.config = {
-    sys_include_dirs = List.rev !sys_inc_rev;
-    user_include_dirs = List.rev !user_inc_rev;
+    sys_include_dirs =
+      List.rev !sys_inc_rev |> List.map append_slash_if_needed;
+    user_include_dirs =
+      List.rev !user_inc_rev |> List.map append_slash_if_needed
   } in
-  try
-    let chan, filename =
-      match input_file with
-      | None -> (stdin, "<stdin>")
-      | Some path -> (open_in path, path)
-    in
-    let tu = parse_c_file preproc_conf chan filename in
-    if input_file <> None then close_in chan;
-    tu |> List.iter (Format.printf "%a@." AST.pp_extern_decl);
-    Format.printf "%a@." dump_tu tu
-  with P.Syntax_Error tok ->
-    Format.eprintf "%a: syntax error at ‘%s’@."
-      Preproc.pp_pos tok.pos tok.text
+
+  let chan, filename =
+    match input_file with
+    | None -> (stdin, "<stdin>")
+    | Some path -> (open_in path, path)
+  in
+  let () = parse_c_file preproc_conf chan filename in
+  if input_file <> None then close_in chan

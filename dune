@@ -1,9 +1,10 @@
-(executable
-  (name parse)
+(executables
+  (names parse parse)
   (modes byte exe)
-  (libraries extlib)
+  (libraries menhirLib)
   (preprocess (pps ppx_deriving.std)))
 (ocamllex lexer)
-(env
- (dev
-  (flags (:standard -g -w -27))))
+(env (dev (flags (:standard -g -w -27))))
+(menhir
+  (modules parser)
+  (flags --table --external-tokens Token --unused-tokens -v --trace))

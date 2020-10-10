@@ -1,7 +1,6 @@
 {
 open Lexing
 open Token
-open Type_Size
 
 let next_line lexbuf =
   let p = lexbuf.lex_curr_p in
@@ -115,12 +114,8 @@ let octdigit = ['0'-'7']
 let hexdigit = ['0'-'9' 'a'-'f' 'A'-'F']
 let letter = ['a'- 'z' 'A'-'Z']
 
-
 let u_suffix = ['u' 'U']
-let l_suffix = "l"|"L"
-let ll_suffix = "ll"|"LL"
-
-let f_suffix = ['f' 'F']
+let l_suffix = "l"|"L"|"ll"|"LL"
 
 let hexprefix = '0' ['x' 'X']
 
@@ -164,81 +159,65 @@ rule token s = parse
                   token s lexbuf }
 | blank         { add_whitespace s lexbuf;
                   token s lexbuf }
-| floatnum as s { TFloat (s, Size_Double) }
-| (floatnum as s) f_suffix
-                { TFloat (s, Size_Float) }
-| (floatnum as s) l_suffix
-                { TFloat (s, Size_Long_Double) }
-| num as s      { TInt (s, true, Size_Int) }
-| (num as s) u_suffix
-                { TInt (s, false, Size_Int) }
-| (num as s) l_suffix
-                { TInt (s, true, Size_Long) }
-| (num as s) u_suffix l_suffix
-                { TInt (s, false, Size_Long) }
-| (num as s) l_suffix u_suffix
-                { TInt (s, false, Size_Long) }
-| (num as s) ll_suffix
-                { TInt (s, true, Size_Long_Long) }
-| (num as s) u_suffix ll_suffix
-                { TInt (s, false, Size_Long_Long) }
-| (num as s) ll_suffix u_suffix
-                { TInt (s, false, Size_Long_Long) }
+| floatnum as s ['f' 'F' 'l' 'L']?
+                { FLOAT_LIT s }
+| (num as s) ( l_suffix? u_suffix? | u_suffix l_suffix )
+                { INT_LIT s }
 | '"' (string_elem* as s) '"'
-                { TString (parse_string s) }
+                { STRING_LIT (parse_string s) }
 | "'" (char_elem* as s) "'"
-                { TChar (parse_string s) }
-| "..."         { Ellipsis }
-| "+="          { PlusEq }
-| "-="          { MinusEq }
-| "*="          { StarEq }
-| "/="          { SlashEq }
-| "%="          { PercentEq }
-| "|="          { PipeEq }
-| "&="          { AndEq }
-| "^="          { CircEq }
-| "<<="         { LtLtEq }
-| ">>="         { GtGtEq }
-| "<<"          { LtLt }
-| ">>"          { GtGt }
-| "=="          { EqEq }
-| "!="          { BangEq }
-| "<="          { LtEq }
-| ">="          { GtEq }
-| "="           { Eq }
-| "<"           { Lt }
-| ">"           { Gt }
-| "++"          { PlusPlus }
-| "--"          { MinusMinus }
-| "->"          { Arrow }
-| '+'           { TPlus }
-| '-'           { TMinus }
-| '*'           { Star }
-| '/'           { Slash }
-| '%'           { Percent }
-| '!'           { Bang }
-| "&&"          { AndAnd }
-| "||"          { PipePipe }
-| '&'           { TAnd }
-| '|'           { Pipe }
-| '^'           { Circ }
-| '?'           { Quest }
-| ':'           { Colon }
-| '~'           { Tilde }
-| '{'           { LBrace }
-| '}'           { RBrace }
-| '['           { LBrack }
-| ']'           { RBrack }
-| '('           { LParen }
-| ')'           { RParen }
-| ';'           { Semi }
-| ','           { Comma }
-| '.'           { Dot }
-| ident         { PreIdent [] }
+                { CHAR_LIT (parse_string s) }
+| "..."         { ELLIPSIS }
+| "+="          { PLUSEQ }
+| "-="          { MINUSEQ }
+| "*="          { STAREQ }
+| "/="          { SLASHEQ }
+| "%="          { PERCENTEQ }
+| "|="          { BAREQ }
+| "&="          { AMPEQ }
+| "^="          { CIRCEQ }
+| "<<="         { LTLTEQ }
+| ">>="         { GTGTEQ }
+| "<<"          { LTLT }
+| ">>"          { GTGT }
+| "=="          { EQEQ }
+| "!="          { BANGEQ }
+| "<="          { LTEQ }
+| ">="          { GTEQ }
+| "="           { EQ }
+| "<"           { LT }
+| ">"           { GT }
+| "++"          { PLUSPLUS }
+| "--"          { MINUSMINUS }
+| "->"          { ARROW }
+| '+'           { PLUS }
+| '-'           { MINUS }
+| '*'           { STAR }
+| '/'           { SLASH }
+| '%'           { PERCENT }
+| '!'           { BANG }
+| "&&"          { AMPAMP }
+| "||"          { BARBAR }
+| '&'           { AMP }
+| '|'           { BAR }
+| '^'           { CIRC }
+| '?'           { QUEST }
+| ':'           { COLON }
+| '~'           { TILDE }
+| '{'           { LBRACE }
+| '}'           { RBRACE }
+| '['           { LBRACK }
+| ']'           { RBRACK }
+| '('           { LPAREN }
+| ')'           { RPAREN }
+| ';'           { SEMI }
+| ','           { COMMA }
+| '.'           { DOT }
+| ident         { PREIDENT [] }
 | eof           { EOF }
-| "##"          { HashHash }
-| '#'           { Hash }
-| _             { Unknown }
+| "##"          { HASHHASH }
+| '#'           { HASH }
+| _             { UNKNOWN }
 
 and comment s = parse
 | "*/"          { add_whitespace s lexbuf }

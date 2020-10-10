@@ -1,5 +1,5 @@
 open Token
-open Type_Size
+open Auto_parser
 
 module H =
   Hashtbl.Make(struct
@@ -67,8 +67,8 @@ let init_state conf input_chan filename =
     in [
       "__FILE__", ObjLike [Magic_FILE];
       "__LINE__", ObjLike [Magic_LINE];
-      "__STDC__", ObjLike [r (TInt ("1", true, Size_Int)) "1"];
-      "__STDC_VERSION__", ObjLike [r (TInt ("199901", true, Size_Long)) "199901L"];
+      "__STDC__", ObjLike [r (INT_LIT "1") "1"];
+      "__STDC_VERSION__", ObjLike [r (INT_LIT "199901L") "199901L"];
     ] |> List.to_seq |> H.of_seq
   in
   { ws_buf = Buffer.create 1024;
@@ -109,10 +109,10 @@ let lex ws_buf lexbuf =
   let text = Lexing.lexeme lexbuf in
   let pos = lexbuf.lex_start_p in
   let ws0 = Buffer.contents ws_buf in
-(*if kind = Hash then
+(*if kind = HASH then
     Format.eprintf "%a: ‘%s%s’ %b@." pp_pos pos ws0 text (at_bol pos ws0);*)
-  if kind = Hash && at_bol pos ws0 then
-    { kind = Directive; text; pos; ws = "" }
+  if kind = HASH && at_bol pos ws0 then
+    { kind = DIRECTIVE; text; pos; ws = "" }
   else if kind = EOF then
     { kind; text; pos; ws = "" }
   else
@@ -165,7 +165,7 @@ let expect p text =
 let expect_ident p =
   let t = getsym p in
   match t.kind with
-  | PreIdent _ -> t.text
+  | PREIDENT _ -> t.text
   | _ -> error t.pos "identifier expected"
 
 let expect_eof p =
@@ -176,9 +176,9 @@ let parse_macro_arg stop_at_comma p =
   let rec loop depth acc =
     let t = p.tok in
     match t.kind with
-    | Comma when stop_at_comma && depth = 0 -> acc
-    | LParen -> skip p; loop (depth+1) (t :: acc)
-    | RParen ->
+    | COMMA when stop_at_comma && depth = 0 -> acc
+    | LPAREN -> skip p; loop (depth+1) (t :: acc)
+    | RPAREN ->
       if depth = 0 then acc else begin
         skip p;
         loop (depth-1) (t :: acc)
@@ -193,13 +193,13 @@ let parse_macro_arg stop_at_comma p =
 let parse_macro_arg_list arity p =
   skip p; (* '(' *)
   match p.tok.kind with
-  | RParen -> skip p; []
+  | RPAREN -> skip p; []
   | _ ->
     let rec loop n acc =
       let arg = parse_macro_arg (n < arity) p in
       match getsym p with
-      | { kind = RParen; _ } -> arg :: acc
-      | { kind = Comma; _ } -> loop (n+1) (arg :: acc)
+      | { kind = RPAREN; _ } -> arg :: acc
+      | { kind = COMMA; _ } -> loop (n+1) (arg :: acc)
       | { pos; _ } -> error pos "unexpected_token in macro argument list"
     in
     loop 0 []
@@ -244,30 +244,30 @@ let stringify pos ws l =
       end;
       Buffer.contents buf
   in
-  { kind = TString s; text = quote s; pos; ws }
+  { kind = STRING_LIT s; text = quote s; pos; ws }
 
 let get_noexp_list = function
-  | { kind = PreIdent l; _ } -> l
+  | { kind = PREIDENT l; _ } -> l
   | _ -> []
 
 let concat_token pos t1 t2 =
   let text = t1.text ^ t2.text in
   let kind =
     match parse_token pos text with
-    | PreIdent _ -> PreIdent (get_noexp_list t1 @ get_noexp_list t2)
+    | PREIDENT _ -> PREIDENT (get_noexp_list t1 @ get_noexp_list t2)
     | k -> k
   in
   { kind; text; pos; ws = "" }
 
 let mark_token macro_name = function
-  | { kind = PreIdent l; _ } as t ->
-    { t with kind = PreIdent (macro_name :: l) }
+  | { kind = PREIDENT l; _ } as t ->
+    { t with kind = PREIDENT (macro_name :: l) }
   | t -> t
 
 let rec subst_token (macro_name, noexp, pos, ws as token_info)
     arg_tab verbatim = function
-  | Verbatim ({ kind = PreIdent _; _ } as t) ->
-    [{ t with kind = PreIdent (macro_name :: noexp); pos }]
+  | Verbatim ({ kind = PREIDENT _; _ } as t) ->
+    [{ t with kind = PREIDENT (macro_name :: noexp); pos }]
   | Verbatim t ->
     [{ t with pos }]
   | Param i ->
@@ -291,10 +291,10 @@ let rec subst_token (macro_name, noexp, pos, ws as token_info)
     end
   | Magic_FILE ->
     let s = pos.pos_fname in
-    [{ kind = TString s; text = quote s; pos; ws }]
+    [{ kind = STRING_LIT s; text = quote s; pos; ws }]
   | Magic_LINE ->
     let s = string_of_int pos.pos_lnum in
-    [{ kind = TInt (s, true, Size_Int); text = s; pos; ws }]
+    [{ kind = INT_LIT s; text = s; pos; ws }]
 
 let rec find_include_file search_path filename =
   match search_path with
@@ -357,38 +357,38 @@ let parse_char s =
   Char.code c
 
 let is_prefix_op = function
-  | TMinus | Tilde | Bang -> true
+  | MINUS | TILDE | BANG -> true
   | _ -> false
 
 let eval_prefix_op op v =
   match op with
-  | TMinus -> Int64.neg v
-  | Tilde -> Int64.lognot v
-  | Bang -> if v=0L then 1L else 0L
+  | MINUS -> Int64.neg v
+  | TILDE -> Int64.lognot v
+  | BANG -> if v=0L then 1L else 0L
   | _ -> assert false
 
 let eval_binary_op op v1 v2 =
   match op.kind with
-  | Star -> Int64.mul v1 v2
-  | Slash ->
+  | STAR -> Int64.mul v1 v2
+  | SLASH ->
     if v2 = 0L then error op.pos "division by 0" else Int64.div v1 v2
-  | Percent ->
+  | PERCENT ->
     if v2 = 0L then error op.pos "division by 0" else Int64.rem v1 v2
-  | TPlus -> Int64.add v1 v2
-  | TMinus -> Int64.sub v1 v2
-  | LtLt -> Int64.shift_left v1 (Int64.to_int v2)
-  | GtGt -> Int64.shift_right v1 (Int64.to_int v2)
-  | Lt -> if v1<v2 then 1L else 0L
-  | Gt -> if v1>v2 then 1L else 0L
-  | LtEq -> if v1 <= v2 then 1L else 0L
-  | GtEq -> if v1 >= v2 then 1L else 0L
-  | EqEq -> if v1 = v2 then 1L else 0L
-  | BangEq -> if v1 <> v2 then 1L else 0L
-  | TAnd -> Int64.logand v1 v2
-  | Circ -> Int64.logxor v1 v2
-  | Pipe -> Int64.logor v1 v2
-  | AndAnd -> if v1<>0L && v2<>0L then 1L else 0L
-  | PipePipe -> if v1<>0L || v2<>0L then 1L else 0L
+  | PLUS -> Int64.add v1 v2
+  | MINUS -> Int64.sub v1 v2
+  | LTLT -> Int64.shift_left v1 (Int64.to_int v2)
+  | GTGT -> Int64.shift_right v1 (Int64.to_int v2)
+  | LT -> if v1<v2 then 1L else 0L
+  | GT -> if v1>v2 then 1L else 0L
+  | LTEQ -> if v1 <= v2 then 1L else 0L
+  | GTEQ -> if v1 >= v2 then 1L else 0L
+  | EQEQ -> if v1 = v2 then 1L else 0L
+  | BANGEQ -> if v1 <> v2 then 1L else 0L
+  | AMP -> Int64.logand v1 v2
+  | CIRC -> Int64.logxor v1 v2
+  | BAR -> Int64.logor v1 v2
+  | AMPAMP -> if v1<>0L && v2<>0L then 1L else 0L
+  | BARBAR -> if v1<>0L || v2<>0L then 1L else 0L
   | _ -> assert false
 
 let parse_binary_expr parse_sub_expr op_test p =
@@ -404,11 +404,11 @@ let parse_binary_expr parse_sub_expr op_test p =
 
 let rec parse_atom p =
   match getsym p with
-  | { kind = TInt _; text; _ } ->
+  | { kind = INT_LIT _; text; _ } ->
     parse_int text
-  | { kind = TChar _; text; _ } ->
+  | { kind = CHAR_LIT _; text; _ } ->
     Int64.of_int (parse_char text)
-  | { kind = LParen; _ } ->
+  | { kind = LPAREN; _ } ->
     let v = parse_cond_expr p in
     expect p ")";
     v
@@ -424,24 +424,24 @@ and parse_prefix_expr p =
   end else parse_atom p
 
 and parse_mult_expr p = parse_binary_expr parse_prefix_expr
-    (function Star | Slash | Percent -> true | _ -> false) p
+    (function STAR | SLASH | PERCENT -> true | _ -> false) p
 and parse_add_expr p = parse_binary_expr parse_mult_expr
-    (function TPlus | TMinus -> true | _ -> false) p
+    (function PLUS | MINUS -> true | _ -> false) p
 and parse_shift_expr p = parse_binary_expr parse_add_expr
-    (function LtLt | GtGt -> true | _ -> false) p
+    (function LTLT | GTGT -> true | _ -> false) p
 and parse_rel_expr p = parse_binary_expr parse_shift_expr
-    (function Lt | Gt | LtEq | GtEq -> true | _ -> false) p
+    (function LT | GT | LTEQ | GTEQ -> true | _ -> false) p
 and parse_eq_expr p = parse_binary_expr parse_rel_expr
-    (function EqEq | BangEq -> true | _ -> false) p
-and parse_and_expr p = parse_binary_expr parse_eq_expr ((=) TAnd) p
-and parse_xor_expr p = parse_binary_expr parse_and_expr ((=) Circ) p
-and parse_or_expr p = parse_binary_expr parse_xor_expr ((=) Pipe) p
-and parse_log_and_expr p = parse_binary_expr parse_or_expr ((=) AndAnd) p
-and parse_log_or_expr p = parse_binary_expr parse_log_and_expr ((=) PipePipe) p
+    (function EQEQ | BANGEQ -> true | _ -> false) p
+and parse_and_expr p = parse_binary_expr parse_eq_expr ((=) AMP) p
+and parse_xor_expr p = parse_binary_expr parse_and_expr ((=) CIRC) p
+and parse_or_expr p = parse_binary_expr parse_xor_expr ((=) BAR) p
+and parse_log_and_expr p = parse_binary_expr parse_or_expr ((=) AMPAMP) p
+and parse_log_or_expr p = parse_binary_expr parse_log_and_expr ((=) BARBAR) p
 
 and parse_cond_expr p =
   let v1 = parse_log_or_expr p in
-  if p.tok.kind = Quest then begin
+  if p.tok.kind = QUEST then begin
     skip p;
     let v2 = parse_cond_expr p in
     expect p ":";
@@ -463,7 +463,7 @@ let subject_to_expansion macro_tab p text noexp =
   not (List.mem text noexp) &&
   match H.find macro_tab text with
   | ObjLike _ -> true
-  | FunLike _ -> p.tok.kind = LParen
+  | FunLike _ -> p.tok.kind = LPAREN
   | exception Not_found -> false
 
 let make_parser next =
@@ -472,16 +472,16 @@ let make_parser next =
 let parse_macro_body param_alist p =
   let parse_simple () =
     match getsym p with
-    | { kind = PreIdent _; text = name; _ } as t ->
+    | { kind = PREIDENT _; text = name; _ } as t ->
       begin match List.assoc name param_alist with
         | i -> Param i
         | exception Not_found -> Verbatim t
       end
-    | { kind = Hash; ws; _ } as hash ->
+    | { kind = HASH; ws; _ } as hash ->
       (* According to the standard, each '#' in a function-like macro must be
          followed by a parameter. Here we don't enforce this constraint. *)
       begin match p.tok.kind with
-        | PreIdent _ ->
+        | PREIDENT _ ->
           let name = p.tok.text in
           begin match List.assoc name param_alist with
             | i -> skip p; Stringify (ws, i)
@@ -493,7 +493,7 @@ let parse_macro_body param_alist p =
   in
   let parse_binary () =
     let rec loop rt1 =
-      if p.tok.kind = HashHash then
+      if p.tok.kind = HASHHASH then
         let () = skip p in
         let rt2 = parse_simple () in
         loop (Concat (rt1, rt2))
@@ -510,13 +510,13 @@ let parse_macro_body param_alist p =
 let rec getsym_expand macro_tab p =
   let t = getsym p in
   match t.kind with
-  | PreIdent noexp when subject_to_expansion macro_tab p t.text noexp ->
+  | PREIDENT noexp when subject_to_expansion macro_tab p t.text noexp ->
     expand_ident macro_tab p t;
     getsym_expand macro_tab p
   | _ -> t
 
 and expand_ident macro_tab p t : unit =
-  let noexp = match t.kind with PreIdent l -> l | _ -> assert false in
+  let noexp = match t.kind with PREIDENT l -> l | _ -> assert false in
   let s = t.text in
   let expand arg_tab body =
     let l' =
@@ -531,7 +531,7 @@ and expand_ident macro_tab p t : unit =
     match H.find macro_tab s with
     | ObjLike body -> [||], body
     | FunLike (arity, is_vararg, body) ->
-      assert (p.tok.kind = LParen);
+      assert (p.tok.kind = LPAREN);
       (* length of arg_tab should be arity+1 *)
       let args = parse_macro_arg_list arity p in
       let n_arg = List.length args in
@@ -584,17 +584,18 @@ let make_cond_expander macro_tab p =
     | { text = "defined"; _ } as t ->
       let name =
         match getsym p with
-        | { kind = LParen; _ } ->
+        | { kind = LPAREN; _ } ->
           let name = expect_ident p in
           let () = expect p ")" in
           name
-        | { kind = PreIdent _; text; _ } -> text
+        | { kind = PREIDENT _; text; _ } -> text
         | { pos; _ } -> error pos "identifier expected after ‘defined’"
       in
       let text = if H.mem macro_tab name then "1" else "0" in
-      { t with kind = TInt (text, true, Size_Int); text }
-    | { kind = PreIdent _; _ } as t ->
-      { t with kind = TInt ("0", true, Size_Int); text = "0" }
+      { t with kind = INT_LIT text; text }
+    | { kind = PREIDENT _; _ } as t ->
+      let text = "0" in
+      { t with kind = INT_LIT text; text }
     | t -> t
   end
 
@@ -636,29 +637,29 @@ let handle_define st p =
   Printf.eprintf "%s:%d: #define %s\n" pos.pos_fname pos.pos_lnum name;
   let def =
     match p.tok with
-    | { kind = LParen; ws = ""; _ } ->
+    | { kind = LPAREN; ws = ""; _ } ->
       skip p;
       (* function-like macro *)
       let param_alist, arity, is_vararg =
         match getsym p with
-        | { kind = RParen; _ } -> [], 0, false
-        | { kind = PreIdent _; text; _ } ->
+        | { kind = RPAREN; _ } -> [], 0, false
+        | { kind = PREIDENT _; text; _ } ->
           let rec loop m i =
             match getsym p with
-            | { kind = Comma; _ } ->
+            | { kind = COMMA; _ } ->
               begin match getsym p with
-                | { kind = PreIdent _; text; _ } ->
+                | { kind = PREIDENT _; text; _ } ->
                   loop ((text, i) :: m) (i+1)
-                | { kind = Ellipsis; _ } ->
+                | { kind = ELLIPSIS; _ } ->
                   expect p ")";
                   m, i, true
                 | { pos; _ } -> unexpected_token pos
               end
-            | { kind = RParen; _ } -> m, i, false
+            | { kind = RPAREN; _ } -> m, i, false
             | { pos; _ } -> unexpected_token pos
           in
           loop [text, 0] 1
-        | { kind = Ellipsis; _ } ->
+        | { kind = ELLIPSIS; _ } ->
           expect p ")";
           [], 0, true
         | { pos; _ } -> unexpected_token pos
@@ -800,12 +801,12 @@ let make_preproc_parser st =
         let buf = Bytes.sub_string lb.lex_buffer lb.lex_curr_pos lb.lex_buffer_len in
         Format.eprintf "lexbuf contents: ‘%s’@." buf; *)
         if Lexer.skip_to_directive true st.lexbuf then
-          wrap_token_no_ws Directive st.lexbuf
+          wrap_token_no_ws DIRECTIVE st.lexbuf
         else
           error st.lexbuf.lex_curr_p "unterminated #if"
     in
     match t.kind with
-    | Directive ->
+    | DIRECTIVE ->
       let dir_pos = st.lexbuf.lex_curr_p in
       Lexer.directive dir_buf st.lexbuf;
 (*       Format.eprintf "current position: %a@." pp_pos st.lexbuf.lex_curr_p; *)

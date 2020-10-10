@@ -1,61 +1,63 @@
 type token =
   | EOF
-  | PreIdent of string list (* no_expand_list *)
-  | TInt of string * bool * Type_Size.int_size
-  | TFloat of string * Type_Size.float_size
-  | TChar of string
-  | TString of string
-  | Ellipsis
-  | PlusEq
-  | MinusEq
-  | StarEq
-  | SlashEq
-  | PercentEq
-  | PipeEq
-  | AndEq
-  | CircEq
-  | LtLtEq
-  | GtGtEq
-  | LtLt
-  | GtGt
-  | EqEq
-  | BangEq
-  | LtEq
-  | GtEq
-  | Eq
-  | Lt
-  | Gt
-  | PlusPlus
-  | MinusMinus
-  | Arrow
-  | TPlus
-  | TMinus
-  | Star
-  | Slash
-  | Percent
-  | Bang
-  | AndAnd
-  | PipePipe
-  | TAnd
-  | Pipe
-  | Circ
-  | Quest
-  | Colon
-  | Tilde
-  | LBrace
-  | RBrace
-  | LBrack
-  | RBrack
-  | LParen
-  | RParen
-  | Semi
-  | Comma
-  | Dot
-  | Hash
-  | HashHash
-  | Unknown
-  | Directive
-  | Ident of string
+  | PREIDENT of string list (* no_expand_list *)
+  | INT_LIT of string
+  | FLOAT_LIT of string
+  | CHAR_LIT of string
+  | STRING_LIT of string
+  | ELLIPSIS
+  | PLUSEQ
+  | MINUSEQ
+  | STAREQ
+  | SLASHEQ
+  | PERCENTEQ
+  | BAREQ
+  | AMPEQ
+  | CIRCEQ
+  | LTLTEQ
+  | GTGTEQ
+  | LTLT
+  | GTGT
+  | EQEQ
+  | BANGEQ
+  | LTEQ
+  | GTEQ
+  | EQ
+  | LT
+  | GT
+  | PLUSPLUS
+  | MINUSMINUS
+  | ARROW
+  | PLUS
+  | MINUS
+  | STAR
+  | SLASH
+  | PERCENT
+  | BANG
+  | AMPAMP
+  | BARBAR
+  | AMP
+  | BAR
+  | CIRC
+  | QUEST
+  | COLON
+  | TILDE
+  | LBRACE
+  | RBRACE
+  | LBRACK
+  | RBRACK
+  | LPAREN
+  | RPAREN
+  | SEMI
+  | COMMA
+  | DOT
+  | HASH
+  | HASHHASH
+  | UNKNOWN
+  | DIRECTIVE
+  | IDENT of string
+  | TYPEIDENT of string
+  | AUTO
   | BOOL
   | BREAK
   | CASE
@@ -72,8 +74,10 @@ type token =
   | FOR
   | GOTO
   | IF
+  | INLINE
   | INT
   | LONG
+  | REGISTER
   | RESTRICT
   | RETURN
   | SHORT
@@ -95,6 +99,8 @@ type include_file = SysInclude | UserInclude
 module M = Map.Make(String)
 
 let keyword_map = [
+  "auto"        , AUTO ;
+  "_Bool"       , BOOL ;
   "break"       , BREAK ;
   "case"        , CASE ;
   "char"        , CHAR ;
@@ -112,6 +118,7 @@ let keyword_map = [
   "if"          , IF ;
   "int"         , INT ;
   "long"        , LONG ;
+  "register"    , REGISTER ;
   "restrict"    , RESTRICT ;
   "return"      , RETURN ;
   "short"       , SHORT ;
@@ -130,9 +137,9 @@ let keyword_map = [
 
 let convert_token kind text =
   match kind with
-  | PreIdent _ ->
+  | PREIDENT _ ->
     begin match M.find text keyword_map with
       | kw -> kw
-      | exception Not_found -> Ident text
+      | exception Not_found -> IDENT text
     end
   | _ -> kind
