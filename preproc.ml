@@ -1,5 +1,4 @@
 open Token
-open Auto_parser
 
 module H =
   Hashtbl.Make(struct

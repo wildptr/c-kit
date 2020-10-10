@@ -121,13 +121,11 @@ let empty_decl_spec =
 %left PLUS MINUS
 %left STAR SLASH PERCENT
 
-(* unfortunately this does not work *)
-(*%type <'a. 'a declarator node -> string option declarator> declr_suffix*)
 %type <Syntax.param_decl> param_decl
 %type <Syntax.initializer_> init
 %type <designator list node * initializer_> init_list_item
 
-%start <unit> top
+%start <extdef list> translation_unit
 
 %%
 
@@ -146,6 +144,8 @@ ident_loc: any_ident { node $1 $loc }
     enumeration-constant
     character-constant
  *)
+
+(** Expressions **)
 
 (* 6.5.1
   primary-expression:
@@ -399,6 +399,8 @@ expr:
  *)
 %inline const_expr: cond_expr {$1}
 
+(** Declarations **)
+
 (* 6.7
   declaration:
     declaration-specifiers init-declarator-list? ';'
@@ -419,18 +421,15 @@ expr:
  *)
 decl:
 | s=decl_spec hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
+| s=fake_decl_spec hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
 | s=incomplete_decl_spec hd=init_declr_1not_tyid tl=list(preceded(COMMA, init_declr)) SEMI
-  { (s, hd::tl) }
-| s1=incomplete_decl_spec name=IDENT s2=incomplete_decl_spec hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
-  { let s =
-      { ds_stor = s1.ds_stor @ s2.ds_stor;
-        ds_type_spec = [Typedef_Name name];
-        ds_type_qual = s1.ds_type_qual @ s2.ds_type_qual;
-        ds_func_spec = s1.ds_func_spec @ s2.ds_func_spec }
-    in (s, hd::tl) }
-| name=IDENT s2=incomplete_decl_spec_opt hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
+  { (node s $loc(s), hd::tl) }
+| s1=incomplete_decl_spec_opt name=IDENT hd=init_declr_1any_id tl=list(preceded(COMMA, init_declr)) SEMI
+  { let s = { s1 with ds_type_spec = [Typedef_Name name] }
+    in (node s ($startpos(s1), $endpos(name)), hd::tl) }
+| name=IDENT s2=incomplete_decl_spec hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
   { let s = { s2 with ds_type_spec = [Typedef_Name name] }
-    in (s, hd::tl) }
+    in (node s ($startpos(name), $endpos(s2)), hd::tl) }
 
 incomplete_decl_spec: (* those that do not contain a type specifier *)
 | storage_spec
@@ -499,6 +498,7 @@ decl_spec_notyid:
       ds_type_qual;
       ds_func_spec = $1::ds_func_spec } }
 
+%inline (* inlining avoids conflicts *)
 incomplete_decl_spec_opt:
 | incomplete_decl_spec {$1}
 | { empty_decl_spec }
@@ -536,7 +536,15 @@ decl_spec_tyid:
 
 decl_spec: decl_spec_notyid | decl_spec_tyid {$1}
 
-(*
+%inline (* avoid conflicts *)
+fake_decl_spec:
+  s1=incomplete_decl_spec name=IDENT s2=incomplete_decl_spec
+  { { ds_stor = s1.ds_stor @ s2.ds_stor;
+      ds_type_spec = [Typedef_Name name];
+      ds_type_qual = s1.ds_type_qual @ s2.ds_type_qual;
+      ds_func_spec = s1.ds_func_spec @ s2.ds_func_spec } }
+
+(* This equivalent definition causes conflicts.
 fake_decl_spec:
 | storage_spec fake_decl_spec
   { let { ds_stor; ds_type_spec; ds_type_qual; ds_func_spec } = $2 in
@@ -561,20 +569,25 @@ fake_decl_spec:
     { ds_stor;
       ds_type_spec;
       ds_type_qual;
-      ds_func_spec = $1::ds_func_spec } }
-*)
+      ds_func_spec = $1::ds_func_spec } } *)
 
 init_declr:
 | declr
-  { () }
+  { ($1, None) }
 | declr EQ init
-  { () }
+  { ($1, Some $3) }
 
 init_declr_1not_tyid:
 | declr_1not_tyid
-  { () }
+  { ($1, None) }
 | declr_1not_tyid EQ init
-  { () }
+  { ($1, Some $3) }
+
+init_declr_1any_id:
+| declr_1any_id
+  { ($1, None) }
+| declr_1any_id EQ init
+  { ($1, Some $3) }
 
 (* 6.7.1
   storage-class-specifier:
@@ -753,6 +766,21 @@ declr_1not_tyid: (* first terminal is not TYPEIDENT *)
 | ptr direct_declr
   { List.fold_right (fun (q, pos) acc -> node (D_Ptr (acc, q)) (pos, $endpos)) $1 $2 }
 
+declr_1any_id:
+| IDENT | TYPEIDENT
+  { node (D_Base $1) $loc }
+| declr_1any_id declr_suffix
+  { node ($2 $1) $loc }
+
+func_declr_suffix_ansi:
+  LPAREN param_type_list RPAREN
+  { let (decls, vararg) = $2 in
+    fun d -> D_Func (d, decls, vararg) }
+
+func_declr_suffix_oldstyle:
+  LPAREN hd=IDENT tl=list(preceded(COMMA, any_ident)) RPAREN
+  { fun d -> D_Old_Func (d, hd::tl) }
+
 abs_declr_suffix:
 | LBRACK q=list(type_qual) e=assign_expr? RBRACK
   { fun d -> D_Array (d, {ad_size_opt=e; ad_type_qual=q; ad_static_flag=false}) }
@@ -761,16 +789,14 @@ abs_declr_suffix:
   { fun d -> D_Array (d, {ad_size_opt=Some e; ad_type_qual=q; ad_static_flag=true}) }
 | LBRACK q=list(type_qual) STAR RBRACK
   { fun d -> D_Array (d, {ad_size_opt=None; ad_type_qual=q; ad_static_flag=false}) }
-| LPAREN param_type_list RPAREN
-  { let (decls, vararg) = $2 in
-    fun d -> D_Func (d, decls, vararg) }
+| func_declr_suffix_ansi { $1 }
 | LPAREN RPAREN
   { fun d -> D_Old_Func (d, []) }
 
 declr_suffix:
-| abs_declr_suffix {$1}
-| LPAREN hd=IDENT tl=list(preceded(COMMA, any_ident)) RPAREN
-  { fun d -> D_Old_Func (d, hd::tl) }
+| abs_declr_suffix
+| func_declr_suffix_oldstyle
+  { $1 }
 
 (*
   int f(int(T))
@@ -810,22 +836,16 @@ param_type_list:
 param_decl:
 | decl_spec abs_declr
 | incomplete_decl_spec abs_declr_1not_any_id (* missing type specifier *)
-  { ($1, $2) }
-| s1=incomplete_decl_spec name=IDENT s2=incomplete_decl_spec d=abs_declr
+  { (node $1 $loc($1), $2) }
+| s1=incomplete_decl_spec_opt name=IDENT s2=incomplete_decl_spec_opt d=abs_declr
   { let s =
       { ds_stor = s1.ds_stor @ s2.ds_stor;
         ds_type_spec = [Typedef_Name name];
         ds_type_qual = s1.ds_type_qual @ s2.ds_type_qual;
         ds_func_spec = s1.ds_func_spec @ s2.ds_func_spec }
-    in (s, d) }
-| s1=incomplete_decl_spec name=IDENT d=abs_declr
-  { let s = { s1 with ds_type_spec = [Typedef_Name name] }
-    in (s, d) }
-| name=IDENT s2=incomplete_decl_spec_opt d=abs_declr
-  { let s = { s2 with ds_type_spec = [Typedef_Name name] }
-    in (s, d) }
+    in (node s ($startpos(s1), $endpos(s2)), d) }
 | decl_spec
-  { ($1, node (D_Base "") ($endpos, $endpos)) }
+  { (node $1 $loc($1), node (D_Base "") ($endpos, $endpos)) }
 
 ptr:
 | STAR q=list(type_qual)
@@ -945,4 +965,141 @@ designator:
 | DOT ident_loc
   { Desig_Field $2 }
 
-top: list(decl) EOF {()}
+(** Statements **)
+
+(* 6.8
+  statement:
+    labeled-statement
+    compound-statement
+    expression-statement
+    selection-statement
+    iteration-statement
+    jump-statement
+ *)
+stmt:
+| labeled_stmt
+| expr_stmt
+| jump_stmt
+  {$1}
+
+(* 6.8.1
+  labeled-statement:
+    identifier ':' statement
+    'case' constant-expression ':' statement
+    'default' ':' statement
+ *)
+labeled_stmt:
+| name=any_ident COLON s=stmt
+  { node (PS_Labeled (s, Label name)) $loc }
+| CASE e=const_expr COLON s=stmt
+  { node (PS_Labeled (s, Label_Case e)) $loc }
+| DEFAULT COLON s=stmt
+  { node (PS_Labeled (s, Label_Default)) $loc }
+
+(* 6.8.2
+  compound-statement:
+    '{' block-item-list? '}'
+
+  block-item-list:
+    block-item
+    block-item-list block-item
+
+  block-item:
+    declaration
+    statement
+ *)
+comp_stmt: LBRACE list(block_item) RBRACE { node (PS_Block $2) $loc }
+
+block_item:
+| decl { Item_Decl $1 }
+| stmt { Item_Stmt $1 }
+
+(* 6.8.3
+  expression-stmt:
+    expression? ';'
+ *)
+expr_stmt:
+| expr SEMI
+  { node (PS_Expr $1) $loc }
+| SEMI
+  { node PS_Null $loc }
+
+(* 6.8.6
+  jump-statement:
+    'goto' identifier ';'
+    'continue' ';'
+    'break' ';'
+    'return' expression? ';'
+ *)
+jump_stmt:
+| GOTO ident_loc SEMI
+  { node (PS_Goto $2) $loc }
+| CONTINUE SEMI
+  { node PS_Continue $loc }
+| BREAK SEMI
+  { node PS_Break $loc }
+| RETURN expr? SEMI
+  { node (PS_Return $2) $loc }
+
+(** External definitions **)
+
+(* 6.9
+  translation-unit:
+    external-declaration
+    translation-unit external-declaration
+
+  external-declaration:
+    function-definition
+    declaration
+ *)
+translation_unit: list(extdef) EOF {$1}
+
+extdef:
+| func_def { Func_Def $1 }
+| decl { Decl $1 }
+
+(* 6.9.1
+  function-definition:
+    declaration-specifiers declarator declaration-list? compound-statement
+
+  declaration-list:
+    declaration
+    declaration-list declaration
+ *)
+
+func_def:
+| decl_spec func_declr list(decl) comp_stmt
+  {()}
+| incomplete_decl_spec func_declr_1not_tyid list(decl) comp_stmt
+  {()}
+| s1=incomplete_decl_spec_opt name=IDENT s2=incomplete_decl_spec func_declr
+  list(decl) comp_stmt
+  {()}
+| name=IDENT func_declr_1any_id
+  list(decl) comp_stmt
+  {()}
+| func_declr_1not_tyid list(decl) comp_stmt
+  {()}
+
+%inline
+func_declr:
+  direct_declr func_declr_suffix
+  { node ($2 $1) $loc }
+(* unnecessary, and causes conflicts *)
+(*| LPAREN func_declr RPAREN
+  { node (D_Paren $2) $loc }*)
+
+%inline
+func_declr_1not_tyid:
+  direct_declr_1not_tyid func_declr_suffix
+  { node ($2 $1) $loc }
+
+%inline
+func_declr_1any_id:
+  declr_1any_id func_declr_suffix
+  { node ($2 $1) $loc }
+
+func_declr_suffix:
+| func_declr_suffix_ansi
+| func_declr_suffix_oldstyle
+  { $1 }

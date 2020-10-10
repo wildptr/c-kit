@@ -1,5 +1,5 @@
 (executables
-  (names parse parse)
+  (names parse)
   (modes byte exe)
   (libraries menhirLib)
   (preprocess (pps ppx_deriving.std)))

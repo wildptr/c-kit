@@ -1,4 +1,4 @@
-module P = Auto_parser
+module P = Parser
 
 (*let abs_pos (pos:Lexing.position) =
   pos.pos_bol + pos.pos_cnum*)
@@ -18,7 +18,7 @@ let parse_c_file preproc_conf ic filename =
         pos_bol = 0;
         pos_cnum = 0 }
   in
-  let init_checkpoint = P.Incremental.top init_pos in
+  let init_checkpoint = P.Incremental.translation_unit init_pos in
   P.MenhirInterpreter.loop menhir_supplier init_checkpoint
 
 let append_slash_if_needed path =
@@ -65,5 +65,5 @@ let () =
     | None -> (stdin, "<stdin>")
     | Some path -> (open_in path, path)
   in
-  let () = parse_c_file preproc_conf chan filename in
+  let _ = parse_c_file preproc_conf chan filename in
   if input_file <> None then close_in chan

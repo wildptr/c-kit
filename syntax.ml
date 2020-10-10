@@ -15,6 +15,8 @@ type const_type = Const_Int | Const_Float | Const_Char
 
 type inc_dec = PRE_INC | PRE_DEC | POST_INC | POST_DEC
 
+(** Types **)
+
 (* declaration inside a struct *)
 type struct_decl
 
@@ -49,6 +51,8 @@ type type_qual = Const | Volatile | Restrict
 
 type ptype = type_spec list * type_qual list
 
+(** Expressions **)
+
 type pexpr =
   | PE_Const of const_type * string
   | PE_String of string
@@ -70,6 +74,8 @@ type pexpr =
   | PE_Assign of pexpr node * pexpr node
   | PE_Assign_Binary of binop * pexpr node * pexpr node
   | PE_Seq of pexpr node * pexpr node
+
+(** Declarations **)
 
 type storage_spec =
   | Typedef
@@ -100,9 +106,7 @@ type declarator =
   | D_Old_Func of declarator node * string list
   | D_Paren of declarator node
 
-and param_decl = decl_spec * declarator node
-
-type decl = decl_spec * declarator node list
+and param_decl = decl_spec node * declarator node
 
 type designator =
   | Desig_None
@@ -113,4 +117,39 @@ type initializer_ =
   | Init_Expr of pexpr node
   | Init_List of (designator list node * initializer_) list node
 
-type init_declarator = declarator * initializer_ option
+type decl = decl_spec node * init_declarator list
+
+and init_declarator = declarator node * initializer_ option
+
+(** Statements **)
+
+type label =
+  | Label of string
+  | Label_Case of pexpr node
+  | Label_Default
+
+type pstmt =
+  | PS_Null
+  | PS_Expr of pexpr node
+  | PS_Block of block_item list
+  | PS_Goto of string node
+  | PS_Continue
+  | PS_Break
+  | PS_Return of pexpr node option
+  | PS_Labeled of pstmt node * label
+
+and block_item =
+  | Item_Stmt of pstmt node
+  | Item_Decl of decl
+
+(** External definitions **)
+
+type func_def =
+  { fd_decl_spec : decl_spec node;
+    fd_declarator : declarator node;
+    fd_oldstyle_param_decl : decl list;
+    fd_body : pstmt node }
+
+type extdef =
+  | Func_Def of unit
+  | Decl of decl
