@@ -20,10 +20,12 @@ let handle_decl (ds_node, init_declr_list) =
   if contains_typedef ds_node.body then
     List.iter begin fun (declr, _) ->
       let name = declarator_name declr.body in
-      Context.register_typename name
+      Ctx.register_typename name
     end init_declr_list
 
 %}
+
+%parameter <Ctx : Context.S>
 
 %token EOF
 
@@ -1022,9 +1024,9 @@ stmt_before_else:
  *)
 comp_stmt: comp_stmt1 comp_stmt2 { $2 }
 
-comp_stmt1: "{" { Context.enter_scope () }
+comp_stmt1: "{" { Ctx.enter_scope () }
 comp_stmt2: body=list(block_item) "}"
-  { Context.leave_scope (); node (PS_Block body) $loc }
+  { Ctx.leave_scope (); node (PS_Block body) $loc }
 
 block_item:
 | decl { handle_decl $1; Item_Decl $1 }

@@ -1,5 +1,3 @@
-module P = Parser
-
 (*let abs_pos (pos:Lexing.position) =
   pos.pos_bol + pos.pos_cnum*)
 
@@ -9,13 +7,15 @@ type parser_config =
 
 let parse_c_file conf ic filename =
   let supplier = Preproc.make_supplier conf.preproc_config ic filename in
-  Context.initialize_typename_table conf.typenames;
+  let module C = Context.Make() in
+  let module P = Parser.Make(C) in
+  C.initialize_typename_table conf.typenames;
   let menhir_supplier () =
     (* recognize typedef names *)
     let tok:Preproc.token' =
       match supplier () with
       | { kind = IDENT name; _ } as tok ->
-        if Context.is_typename name then
+        if C.is_typename name then
           { tok with kind = TYPEIDENT name } else tok
       | tok -> tok
     in
