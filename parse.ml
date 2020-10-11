@@ -10,6 +10,9 @@ let parse_c_file conf ic filename =
   let module C = Context.Make() in
   let module P = Parser.Make(C) in
   C.initialize_typename_table conf.typenames;
+  let current_token =
+    ref Preproc.{ kind = EOF; text=""; pos = Lexing.dummy_pos; ws="" }
+  in
   let menhir_supplier () =
     (* recognize typedef names *)
     let tok:Preproc.token' =
@@ -19,6 +22,7 @@ let parse_c_file conf ic filename =
           { tok with kind = TYPEIDENT name } else tok
       | tok -> tok
     in
+    current_token := tok;
     let pos0 = tok.pos in
     let pos1 = { pos0 with Lexing.pos_cnum = pos0.pos_cnum + String.length tok.text } in
     (tok.kind, pos0, pos1)
@@ -31,7 +35,14 @@ let parse_c_file conf ic filename =
         pos_cnum = 0 }
   in
   let init_checkpoint = P.Incremental.translation_unit init_pos in
-  P.MenhirInterpreter.loop menhir_supplier init_checkpoint
+  let handle_error = function
+    | P.MenhirInterpreter.HandlingError env ->
+      let pos = (!current_token).pos in
+      Printf.eprintf "%s:%d:%d: syntax error\n" pos.pos_fname
+        pos.pos_lnum (pos.pos_cnum - pos.pos_bol)
+    | _ -> failwith "?"
+  in
+  P.MenhirInterpreter.loop_handle ignore handle_error menhir_supplier init_checkpoint
 
 let append_slash_if_needed path =
   let len = String.length path in
@@ -40,7 +51,8 @@ let append_slash_if_needed path =
 let () =
   let sys_inc_rev = ref []
   and user_inc_rev = ref []
-  and input_file = ref None in
+  and input_file = ref None
+  and debug = ref false in
 
   let argc = Array.length Sys.argv in
   let rec parse_argv i =
@@ -57,6 +69,9 @@ let () =
           let arg = Sys.argv.(i+1) in
           user_inc_rev := arg :: !user_inc_rev;
           parse_argv (i+2)
+        | "-debug" ->
+          debug := true;
+          parse_argv (i+1)
         | _ ->
           parse_argv (i+1)
       else i
@@ -69,7 +84,8 @@ let () =
     sys_include_dirs =
       List.rev !sys_inc_rev |> List.map append_slash_if_needed;
     user_include_dirs =
-      List.rev !user_inc_rev |> List.map append_slash_if_needed
+      List.rev !user_inc_rev |> List.map append_slash_if_needed;
+    debug = !debug
   } in
 
   let chan, filename =

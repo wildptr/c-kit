@@ -224,7 +224,7 @@ and comment s = parse
 | eof           { () }
 | _             { add_whitespace s lexbuf; comment s lexbuf }
 
-(* Does not record whitespace. Used in skip_to_directive. *)
+(* Does not record whitespace. Used in [directive] and [skip_to_directive]. *)
 and comment' = parse
 | "*/"          { () }
 | eof           { () }
@@ -258,13 +258,18 @@ and string s = parse
                   Buffer.clear s.string_contents }
 *)
 
-and directive b = parse
-| [^'\n']* '\n' { next_line lexbuf;
-                  let s = lexeme lexbuf in
-                  Buffer.add_string b s;
-                  let n = String.length s in
-                  if n >= 2 && s.[String.length s - 2] = '\\' then
-                    directive b lexbuf }
+(* Beware backslash-newline and trailing multi-line comments. *)
+and directive buf = parse
+| "\\\n"
+  { directive buf lexbuf }
+| "/*"
+  { comment' lexbuf; directive buf lexbuf }
+| '\n'
+  { next_line lexbuf }
+| ([^'\n' '\\' '/']+) as s
+  { Buffer.add_string buf s; directive buf lexbuf }
+| ('\\' | '/') as c
+  { Buffer.add_char buf c; directive buf lexbuf }
 
 and include_file = parse
 | blank         { include_file lexbuf }

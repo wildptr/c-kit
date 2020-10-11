@@ -52,7 +52,8 @@ type state = {
 
 type config = {
   sys_include_dirs : string list;
-  user_include_dirs : string list
+  user_include_dirs : string list;
+  debug : bool
 }
 
 let init_state conf input_chan filename =
@@ -117,6 +118,12 @@ let lex ws_buf lexbuf =
   else
     let () = Buffer.clear ws_buf in
     { kind; text; pos; ws = ws0 }
+
+let lex_debug ws_buf lexbuf =
+  let tok = lex ws_buf lexbuf in
+  Format.printf "%a: %a ‘%s%s’@." pp_pos tok.pos
+    Token.pp_token tok.kind tok.ws tok.text;
+  tok
 
 exception Error of Lexing.position * string
 
@@ -808,7 +815,7 @@ let make_preproc_parser st =
     | DIRECTIVE ->
       let dir_pos = st.lexbuf.lex_curr_p in
       Lexer.directive dir_buf st.lexbuf;
-(*       Format.eprintf "current position: %a@." pp_pos st.lexbuf.lex_curr_p; *)
+(*    Format.eprintf "current position: %a@." pp_pos st.lexbuf.lex_curr_p; *)
       let dir = flush_buffer dir_buf in
       assert (st.lexbuf.lex_curr_p.pos_cnum = st.lexbuf.lex_curr_p.pos_bol);
       begin
@@ -835,5 +842,7 @@ let make_supplier conf ic filename =
   let p = make_preproc_parser st in
   fun () ->
     let token = getsym_expand st.macro_tab p in
-(*     Format.printf "%d: %a ‘%s’\n" token.pos pp_pptoken token.kind token.text; *)
+    if conf.debug then
+      Format.printf "%a: %a ‘%s’@."
+        pp_pos token.pos Token.pp_token token.kind token.text;
     { token with kind = convert_token token.kind token.text }
