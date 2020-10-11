@@ -10,6 +10,9 @@ let node body (pos0, pos1) =
 let empty_decl_spec =
   { ds_stor=[]; ds_type_spec=[]; ds_type_qual=[]; ds_func_spec=[] }
 
+let mk_func_def (fd_decl_spec, fd_declarator, fd_oldstyle_param_decl, fd_body) =
+  { fd_decl_spec; fd_declarator; fd_oldstyle_param_decl; fd_body }
+
 %}
 
 %token EOF
@@ -121,8 +124,8 @@ let empty_decl_spec =
 %left PLUS MINUS
 %left STAR SLASH PERCENT
 
-%type <Syntax.param_decl> param_decl
-%type <Syntax.initializer_> init
+%type <param_decl> param_decl
+%type <initializer_> init
 %type <designator list node * initializer_> init_list_item
 
 %start <extdef list> translation_unit
@@ -773,9 +776,11 @@ declr_1any_id:
   { node ($2 $1) $loc }
 
 func_declr_suffix_ansi:
-  LPAREN param_type_list RPAREN
+| LPAREN param_type_list RPAREN
   { let (decls, vararg) = $2 in
     fun d -> D_Func (d, decls, vararg) }
+| LPAREN RPAREN
+  { fun d -> D_Old_Func (d, []) }
 
 func_declr_suffix_oldstyle:
   LPAREN hd=IDENT tl=list(preceded(COMMA, any_ident)) RPAREN
@@ -790,8 +795,6 @@ abs_declr_suffix:
 | LBRACK q=list(type_qual) STAR RBRACK
   { fun d -> D_Array (d, {ad_size_opt=None; ad_type_qual=q; ad_static_flag=false}) }
 | func_declr_suffix_ansi { $1 }
-| LPAREN RPAREN
-  { fun d -> D_Old_Func (d, []) }
 
 declr_suffix:
 | abs_declr_suffix
@@ -977,9 +980,15 @@ designator:
     jump-statement
  *)
 stmt:
-| labeled_stmt
-| expr_stmt
-| jump_stmt
+| semicolon_terminated_stmt
+| comp_stmt
+| stmt_terminated_stmt
+  {$1}
+
+stmt_before_else:
+| semicolon_terminated_stmt
+| comp_stmt
+| stmt_terminated_stmt_before_else
   {$1}
 
 (* 6.8.1
@@ -988,13 +997,6 @@ stmt:
     'case' constant-expression ':' statement
     'default' ':' statement
  *)
-labeled_stmt:
-| name=any_ident COLON s=stmt
-  { node (PS_Labeled (s, Label name)) $loc }
-| CASE e=const_expr COLON s=stmt
-  { node (PS_Labeled (s, Label_Case e)) $loc }
-| DEFAULT COLON s=stmt
-  { node (PS_Labeled (s, Label_Default)) $loc }
 
 (* 6.8.2
   compound-statement:
@@ -1018,20 +1020,13 @@ block_item:
   expression-stmt:
     expression? ';'
  *)
-expr_stmt:
+semicolon_terminated_stmt:
 | expr SEMI
   { node (PS_Expr $1) $loc }
 | SEMI
   { node PS_Null $loc }
-
-(* 6.8.6
-  jump-statement:
-    'goto' identifier ';'
-    'continue' ';'
-    'break' ';'
-    'return' expression? ';'
- *)
-jump_stmt:
+| DO s=stmt WHILE LPAREN e=expr RPAREN SEMI
+  { node (PS_Do_While (s, e)) $loc }
 | GOTO ident_loc SEMI
   { node (PS_Goto $2) $loc }
 | CONTINUE SEMI
@@ -1040,6 +1035,73 @@ jump_stmt:
   { node PS_Break $loc }
 | RETURN expr? SEMI
   { node (PS_Return $2) $loc }
+
+stmt_terminated_stmt:
+(* labeled *)
+| name=any_ident COLON s=stmt
+  { node (PS_Labeled (s, Label name)) $loc }
+| CASE e=const_expr COLON s=stmt
+  { node (PS_Labeled (s, Label_Case e)) $loc }
+| DEFAULT COLON s=stmt
+  { node (PS_Labeled (s, Label_Default)) $loc }
+(* selection *)
+| IF LPAREN e=expr RPAREN s=stmt
+  { node (PS_If (e, s)) $loc }
+| IF LPAREN e=expr RPAREN s1=stmt_before_else ELSE s2=stmt
+  { node (PS_Ifelse (e, s1, s2)) $loc }
+| SWITCH LPAREN e=expr RPAREN s=stmt
+  { node (PS_Switch (e, s)) $loc }
+(* iteration *)
+| WHILE LPAREN e=expr RPAREN s=stmt
+  { node (PS_While (e, s)) $loc }
+| FOR LPAREN e1=expr? SEMI e2=expr? SEMI e3=expr? RPAREN s=stmt
+  { node (PS_For1 (e1, e2, e3, s)) $loc }
+| FOR LPAREN d=decl e2=expr? SEMI e3=expr? RPAREN s=stmt
+  { node (PS_For2 (d, e2, e3, s)) $loc }
+
+(* 6.8.4
+  selection-statement:
+    'if' '(' expression ')' statement
+    'if' '(' expression ')' statement 'else' statement
+    'switch' '(' expression ')' statement
+ *)
+
+stmt_terminated_stmt_before_else:
+(* labeled *)
+| name=any_ident COLON s=stmt_before_else
+  { node (PS_Labeled (s, Label name)) $loc }
+| CASE e=const_expr COLON s=stmt_before_else
+  { node (PS_Labeled (s, Label_Case e)) $loc }
+| DEFAULT COLON s=stmt_before_else
+  { node (PS_Labeled (s, Label_Default)) $loc }
+(* selection *)
+| IF LPAREN e=expr RPAREN s1=stmt_before_else ELSE s2=stmt_before_else
+  { node (PS_Ifelse (e, s1, s2)) $loc }
+| SWITCH LPAREN e=expr RPAREN s=stmt_before_else
+  { node (PS_Switch (e, s)) $loc }
+(* iteration *)
+| WHILE LPAREN e=expr RPAREN s=stmt_before_else
+  { node (PS_While (e, s)) $loc }
+| FOR LPAREN e1=expr? SEMI e2=expr? SEMI e3=expr? RPAREN s=stmt_before_else
+  { node (PS_For1 (e1, e2, e3, s)) $loc }
+| FOR LPAREN d=decl e2=expr? SEMI e3=expr? RPAREN s=stmt_before_else
+  { node (PS_For2 (d, e2, e3, s)) $loc }
+
+(* 6.8.5
+  iteration-statement:
+    'while' '(' expression ')' statement
+    'do' statement 'while' '(' expression ')' ';'
+    'for' '(' expression? ';' expression? ';' expression? ')' statement
+    'for' '(' declaration expression? ';' expression? ')' statement
+ *)
+
+(* 6.8.6
+  jump-statement:
+    'goto' identifier ';'
+    'continue' ';'
+    'break' ';'
+    'return' expression? ';'
+ *)
 
 (** External definitions **)
 
@@ -1068,18 +1130,18 @@ extdef:
  *)
 
 func_def:
-| decl_spec func_declr list(decl) comp_stmt
-  {()}
-| incomplete_decl_spec func_declr_1not_tyid list(decl) comp_stmt
-  {()}
-| s1=incomplete_decl_spec_opt name=IDENT s2=incomplete_decl_spec func_declr
-  list(decl) comp_stmt
-  {()}
-| name=IDENT func_declr_1any_id
-  list(decl) comp_stmt
-  {()}
-| func_declr_1not_tyid list(decl) comp_stmt
-  {()}
+| s=decl_spec d=func_declr pd=list(decl) b=comp_stmt
+| s=fake_decl_spec d=func_declr pd=list(decl) b=comp_stmt
+| s=incomplete_decl_spec d=func_declr_1not_tyid pd=list(decl) b=comp_stmt
+  { mk_func_def (node s $loc(s), d, pd, b) }
+| name=IDENT s2=incomplete_decl_spec d=func_declr pd=list(decl) b=comp_stmt
+  { let s = { s2 with ds_type_spec = [Typedef_Name name] } in
+    mk_func_def (node s ($startpos(name), $endpos(s2)), d, pd, b) }
+| name=IDENT d=func_declr_1any_id pd=list(decl) b=comp_stmt
+  { let s = { empty_decl_spec with ds_type_spec = [Typedef_Name name] } in
+    mk_func_def (node s $loc(name), d, pd, b) }
+| d=func_declr_1not_tyid pd=list(decl) b=comp_stmt
+  { mk_func_def (node empty_decl_spec ($startpos, $startpos), d, pd, b) }
 
 %inline
 func_declr:

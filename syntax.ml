@@ -137,6 +137,13 @@ type pstmt =
   | PS_Break
   | PS_Return of pexpr node option
   | PS_Labeled of pstmt node * label
+  | PS_If of pexpr node * pstmt node
+  | PS_Ifelse of pexpr node * pstmt node * pstmt node
+  | PS_Switch of pexpr node * pstmt node
+  | PS_While of pexpr node * pstmt node
+  | PS_Do_While of pstmt node * pexpr node
+  | PS_For1 of pexpr node option * pexpr node option * pexpr node option * pstmt node
+  | PS_For2 of decl * pexpr node option * pexpr node option * pstmt node
 
 and block_item =
   | Item_Stmt of pstmt node
@@ -151,5 +158,5 @@ type func_def =
     fd_body : pstmt node }
 
 type extdef =
-  | Func_Def of unit
+  | Func_Def of func_def
   | Decl of decl
