@@ -436,15 +436,16 @@ expr:
  *)
 decl:
 | s=decl_spec hd=init_declr tl=list(preceded(",", init_declr)) ";"
-| s=fake_decl_spec hd=init_declr tl=list(preceded(",", init_declr)) ";"
-| s=incomplete_decl_spec hd=init_declr_1not_tyid tl=list(preceded(",", init_declr)) ";"
+| s=fake_decl_spec_safe hd=init_declr tl=list(preceded(",", init_declr)) ";"
+| s=fake_decl_spec_id_first hd=init_declr tl=list(preceded(",", init_declr)) ";"
+(* had to split the rule to avoid conflicts with func_def *)
+| s=incomplete_decl_spec hd=init_declr_(declr_xxx) tl=list(preceded(",", init_declr)) ";"
+| s=incomplete_decl_spec hd=init_declr_(id_declr) tl=list(preceded(",", init_declr)) ";"
+| s=incomplete_decl_spec hd=init_declr_(declr_1not_any_id) tl=list(preceded(",", init_declr)) ";"
   { (node s $loc(s), hd::tl) }
-| s1=incomplete_decl_spec_opt name=IDENT hd=init_declr_1any_id tl=list(preceded(",", init_declr)) ";"
+| s1=incomplete_decl_spec_opt name=IDENT hd=init_declr_(declr_1_any_id) tl=list(preceded(",", init_declr)) ";"
   { let s = { s1 with ds_type_spec = [Typedef_Name name] }
     in (node s ($startpos(s1), $endpos(name)), hd::tl) }
-| name=IDENT s2=incomplete_decl_spec hd=init_declr tl=list(preceded(",", init_declr)) ";"
-  { let s = { s2 with ds_type_spec = [Typedef_Name name] }
-    in (node s ($startpos(name), $endpos(s2)), hd::tl) }
 
 incomplete_decl_spec: (* those that do not contain a type specifier *)
 | storage_spec
@@ -552,39 +553,24 @@ decl_spec_tyid:
 decl_spec: decl_spec_notyid | decl_spec_tyid {$1}
 
 %inline (* avoid conflicts *)
-fake_decl_spec:
+fake_decl_spec_safe:
   s1=incomplete_decl_spec name=IDENT s2=incomplete_decl_spec
   { { ds_stor = s1.ds_stor @ s2.ds_stor;
       ds_type_spec = [Typedef_Name name];
       ds_type_qual = s1.ds_type_qual @ s2.ds_type_qual;
       ds_func_spec = s1.ds_func_spec @ s2.ds_func_spec } }
 
-(* This equivalent definition causes conflicts.
-fake_decl_spec:
-| storage_spec fake_decl_spec
-  { let { ds_stor; ds_type_spec; ds_type_qual; ds_func_spec } = $2 in
-    { ds_stor = $1::ds_stor;
-      ds_type_spec;
-      ds_type_qual;
-      ds_func_spec } }
-| IDENT incomplete_decl_spec
-  { let { ds_stor; ds_type_spec; ds_type_qual; ds_func_spec } = $2 in
-    { ds_stor;
-      ds_type_spec = Typedef_Name $1 :: ds_type_spec;
-      ds_type_qual;
-      ds_func_spec } }
-| type_qual fake_decl_spec
-  { let { ds_stor; ds_type_spec; ds_type_qual; ds_func_spec } = $2 in
-    { ds_stor;
-      ds_type_spec;
-      ds_type_qual = $1::ds_type_qual;
-      ds_func_spec } }
-| func_spec fake_decl_spec
-  { let { ds_stor; ds_type_spec; ds_type_qual; ds_func_spec } = $2 in
-    { ds_stor;
-      ds_type_spec;
-      ds_type_qual;
-      ds_func_spec = $1::ds_func_spec } } *)
+(*
+%inline
+fake_decl_spec_id_last:
+  s1=incomplete_decl_spec name=IDENT
+  {{ s1 with ds_type_spec = [Typedef_Name name] }}
+*)
+
+%inline
+fake_decl_spec_id_first:
+  name=IDENT s2=incomplete_decl_spec
+  {{ s2 with ds_type_spec = [Typedef_Name name] }}
 
 init_declr:
 | declr
@@ -592,16 +578,10 @@ init_declr:
 | declr EQ init
   { ($1, Some $3) }
 
-init_declr_1not_tyid:
-| declr_1not_tyid
+init_declr_(declr_):
+| declr_
   { ($1, None) }
-| declr_1not_tyid EQ init
-  { ($1, Some $3) }
-
-init_declr_1any_id:
-| declr_1any_id
-  { ($1, None) }
-| declr_1any_id EQ init
+| declr_ EQ init
   { ($1, Some $3) }
 
 (* 6.7.1
@@ -776,15 +756,35 @@ declr:
 | ptr direct_declr
   { List.fold_right (fun (q, pos) acc -> node (D_Ptr (acc, q)) (pos, $endpos)) $1 $2 }
 
+(*
 declr_1not_tyid: (* first terminal is not TYPEIDENT *)
 | direct_declr_1not_tyid {$1}
 | ptr direct_declr
   { List.fold_right (fun (q, pos) acc -> node (D_Ptr (acc, q)) (pos, $endpos)) $1 $2 }
+*)
 
-declr_1any_id:
+declr_1_any_id:
 | IDENT | TYPEIDENT
   { node (D_Base $1) $loc }
-| declr_1any_id declr_suffix
+| declr_1_any_id declr_suffix
+  { node ($2 $1) $loc }
+
+(* For disambiguation in old-style function declarations.
+   Begins with IDENT and contains at least one declarator suffix.
+   I am unable to invent a proper name for this. *)
+declr_xxx:
+| IDENT nonempty_list(declr_suffix)
+  { node (D_Base $1) $loc } (*TODO*)
+
+declr_1not_any_id:
+| direct_declr_1not_any_id {$1}
+| ptr direct_declr
+  { List.fold_right (fun (q, pos) acc -> node (D_Ptr (acc, q)) (pos, $endpos)) $1 $2 }
+
+direct_declr_1not_any_id:
+| "(" declr ")"
+  { node (D_Paren $2) $loc }
+| direct_declr_1not_any_id declr_suffix
   { node ($2 $1) $loc }
 
 func_declr_suffix_ansi:
@@ -826,6 +826,7 @@ direct_declr:
 | direct_declr declr_suffix
   { node ($2 $1) $loc }
 
+(*
 direct_declr_1not_tyid:
 | IDENT
   { node (D_Base $1) $loc }
@@ -833,6 +834,7 @@ direct_declr_1not_tyid:
   { node (D_Paren $2) $loc }
 | direct_declr_1not_tyid declr_suffix
   { node ($2 $1) $loc }
+*)
 
 param_type_list:
 | param_decl
@@ -1146,38 +1148,52 @@ extdef:
  *)
 
 func_def:
-| s=decl_spec d=func_declr pd=list(decl) b=comp_stmt
-| s=fake_decl_spec d=func_declr pd=list(decl) b=comp_stmt
-| s=incomplete_decl_spec d=func_declr_1not_tyid pd=list(decl) b=comp_stmt
+| s=decl_spec d=declr pd=list(decl) b=comp_stmt
+| s=fake_decl_spec_safe d=declr pd=list(decl) b=comp_stmt
+| s=fake_decl_spec_id_first d=declr pd=list(decl) b=comp_stmt
+| s=incomplete_decl_spec d=declr_xxx pd=list(decl) b=comp_stmt
+| s=incomplete_decl_spec d=declr_1not_any_id pd=list(decl) b=comp_stmt
   { mk_func_def (node s $loc(s), d, pd, b) }
-| name=IDENT s2=incomplete_decl_spec d=func_declr pd=list(decl) b=comp_stmt
-  { let s = { s2 with ds_type_spec = [Typedef_Name name] } in
-    mk_func_def (node s ($startpos(name), $endpos(s2)), d, pd, b) }
-| name=IDENT d=func_declr_1any_id pd=list(decl) b=comp_stmt
-  { let s = { empty_decl_spec with ds_type_spec = [Typedef_Name name] } in
+| s1=incomplete_decl_spec_opt name=IDENT d=declr_1_any_id pd=list(decl) b=comp_stmt
+  { let s = { s1 with ds_type_spec = [Typedef_Name name] } in
     mk_func_def (node s $loc(name), d, pd, b) }
 | d=func_declr_1not_tyid pd=list(decl) b=comp_stmt
   { mk_func_def (node empty_decl_spec ($startpos, $startpos), d, pd, b) }
 
-%inline
 func_declr:
-  direct_declr func_declr_suffix
-  { node ($2 $1) $loc }
-(* unnecessary, and causes conflicts *)
-(*| "(" func_declr ")"
-  { node (D_Paren $2) $loc }*)
+| direct_func_declr {$1}
+| ptr direct_func_declr
+  { List.fold_right (fun (q, pos) acc -> node (D_Ptr (acc, q)) (pos, $endpos)) $1 $2 }
 
-%inline
+direct_func_declr:
+| any_id_declr func_declr_suffix
+| direct_func_declr declr_suffix
+  { node ($2 $1) $loc }
+| "(" func_declr ")"
+  { node (D_Paren $2) $loc }
+
 func_declr_1not_tyid:
-  direct_declr_1not_tyid func_declr_suffix
-  { node ($2 $1) $loc }
+| direct_func_declr_1not_tyid {$1}
+| ptr direct_func_declr
+  { List.fold_right (fun (q, pos) acc -> node (D_Ptr (acc, q)) (pos, $endpos)) $1 $2 }
 
-%inline
-func_declr_1any_id:
-  declr_1any_id func_declr_suffix
+direct_func_declr_1not_tyid:
+| id_declr func_declr_suffix
+| direct_func_declr_1not_tyid declr_suffix
   { node ($2 $1) $loc }
+| "(" func_declr ")"
+  { node (D_Paren $2) $loc }
 
 func_declr_suffix:
 | func_declr_suffix_ansi
 | func_declr_suffix_oldstyle
   { $1 }
+
+%inline
+any_id_declr:
+  IDENT | TYPEIDENT
+  { node (D_Base $1) $loc }
+
+%inline
+id_declr: IDENT
+  { node (D_Base $1) $loc }
