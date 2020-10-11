@@ -3,10 +3,22 @@ module P = Parser
 (*let abs_pos (pos:Lexing.position) =
   pos.pos_bol + pos.pos_cnum*)
 
-let parse_c_file preproc_conf ic filename =
-  let supplier = Preproc.make_supplier preproc_conf ic filename in
+type parser_config =
+  { preproc_config: Preproc.config;
+    typenames: string list }
+
+let parse_c_file conf ic filename =
+  let supplier = Preproc.make_supplier conf.preproc_config ic filename in
+  Context.initialize_typename_table conf.typenames;
   let menhir_supplier () =
-    let tok:Preproc.token' = supplier () in
+    (* recognize typedef names *)
+    let tok:Preproc.token' =
+      match supplier () with
+      | { kind = IDENT name; _ } as tok ->
+        if Context.is_typename name then
+          { tok with kind = TYPEIDENT name } else tok
+      | tok -> tok
+    in
     let pos0 = tok.pos in
     let pos1 = { pos0 with Lexing.pos_cnum = pos0.pos_cnum + String.length tok.text } in
     (tok.kind, pos0, pos1)
@@ -53,7 +65,7 @@ let () =
   let optind = parse_argv 1 in
   if optind < argc then input_file := Some (Sys.argv.(optind));
   let input_file = !input_file in
-  let preproc_conf : Preproc.config = {
+  let preproc_config : Preproc.config = {
     sys_include_dirs =
       List.rev !sys_inc_rev |> List.map append_slash_if_needed;
     user_include_dirs =
@@ -65,5 +77,8 @@ let () =
     | None -> (stdin, "<stdin>")
     | Some path -> (open_in path, path)
   in
-  let _ = parse_c_file preproc_conf chan filename in
+  let conf =
+    { preproc_config; typenames = [] }
+  in
+  let _ = parse_c_file conf chan filename in
   if input_file <> None then close_in chan

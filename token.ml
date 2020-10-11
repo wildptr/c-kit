@@ -138,8 +138,8 @@ let keyword_map = [
 let convert_token kind text =
   match kind with
   | PREIDENT _ ->
-    begin match M.find text keyword_map with
-      | kw -> kw
-      | exception Not_found -> IDENT text
+    begin match M.find_opt text keyword_map with
+      | Some kw -> kw
+      | None -> IDENT text
     end
   | _ -> kind

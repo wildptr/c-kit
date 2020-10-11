@@ -13,6 +13,16 @@ let empty_decl_spec =
 let mk_func_def (fd_decl_spec, fd_declarator, fd_oldstyle_param_decl, fd_body) =
   { fd_decl_spec; fd_declarator; fd_oldstyle_param_decl; fd_body }
 
+let contains_typedef declspec =
+  List.mem Typedef declspec.ds_stor
+
+let handle_decl (ds_node, init_declr_list) =
+  if contains_typedef ds_node.body then
+    List.iter begin fun (declr, _) ->
+      let name = declarator_name declr.body in
+      Context.register_typename name
+    end init_declr_list
+
 %}
 
 %token EOF
@@ -30,52 +40,52 @@ let mk_func_def (fd_decl_spec, fd_declarator, fd_oldstyle_param_decl, fd_body) =
 %token <string> STRING_LIT
 %token <string> CHAR_LIT
 
-%token ELLIPSIS
-%token PLUSEQ
-%token MINUSEQ
-%token STAREQ
-%token SLASHEQ
-%token PERCENTEQ
-%token BAREQ
-%token AMPEQ
-%token CIRCEQ
-%token LTLTEQ
-%token GTGTEQ
-%token LTLT
-%token GTGT
-%token EQEQ
-%token BANGEQ
-%token LTEQ
-%token GTEQ
-%token EQ
-%token LT
-%token GT
-%token PLUSPLUS
-%token MINUSMINUS
-%token ARROW
-%token PLUS
-%token MINUS
-%token STAR
-%token SLASH
-%token PERCENT
-%token BANG
-%token AMPAMP
-%token BARBAR
-%token AMP
-%token BAR
-%token CIRC
-%token QUEST
-%token COLON
-%token TILDE
-%token LBRACE
-%token RBRACE
-%token LBRACK
-%token RBRACK
-%token LPAREN
-%token RPAREN
-%token SEMI
-%token COMMA
-%token DOT
+%token ELLIPSIS     "..."
+%token PLUSEQ       "+="
+%token MINUSEQ      "-="
+%token STAREQ       "*="
+%token SLASHEQ      "/="
+%token PERCENTEQ    "%="
+%token BAREQ        "|="
+%token AMPEQ        "&="
+%token CIRCEQ       "^="
+%token LTLTEQ       "<<="
+%token GTGTEQ       ">>="
+%token LTLT         "<<"
+%token GTGT         ">>"
+%token EQEQ         "=="
+%token BANGEQ       "!="
+%token LTEQ         "<="
+%token GTEQ         ">="
+%token EQ           "="
+%token LT           "<"
+%token GT           ">"
+%token PLUSPLUS     "++"
+%token MINUSMINUS   "--"
+%token ARROW        "->"
+%token PLUS         "+"
+%token MINUS        "-"
+%token STAR         "*"
+%token SLASH        "/"
+%token PERCENT      "%"
+%token BANG         "!"
+%token AMPAMP       "&&"
+%token BARBAR       "||"
+%token AMP          "&"
+%token BAR          "|"
+%token CIRC         "^"
+%token QUEST        "?"
+%token COLON        ":"
+%token TILDE        "~"
+%token LBRACE       "{"
+%token RBRACE       "}"
+%token LBRACK       "["
+%token RBRACK       "]"
+%token LPAREN       "("
+%token RPAREN       ")"
+%token SEMI         ";"
+%token COMMA        ","
+%token DOT          "."
 
 %token AUTO
 %token BOOL
@@ -113,16 +123,16 @@ let mk_func_def (fd_decl_spec, fd_declarator, fd_oldstyle_param_decl, fd_body) =
 %token VOLATILE
 %token WHILE
 
-%left BARBAR
-%left AMPAMP
-%left BAR
-%left CIRC
-%left AMP
-%left EQEQ BANGEQ
-%left LT GT LTEQ GTEQ
-%left LTLT GTGT
-%left PLUS MINUS
-%left STAR SLASH PERCENT
+%left "||"
+%left "&&"
+%left "|"
+%left "^"
+%left "&"
+%left "==" "!="
+%left "<" ">" "<=" ">="
+%left "<<" ">>"
+%left "+" "-"
+%left "*" "/" "%"
 
 %type <param_decl> param_decl
 %type <initializer_> init
@@ -169,9 +179,9 @@ lit_expr:
 
 prim_expr_noid:
 | lit_expr {$1}
-| LPAREN expr_noid RPAREN
+| "(" expr_noid ")"
   { node (PE_Paren $2) $loc }
-| LPAREN IDENT RPAREN
+| "(" IDENT ")"
   { node (PE_Ident $2) $loc }
 
 (*
@@ -201,17 +211,17 @@ prim_expr_cast:
  *)
 postfix_expr_noid:
 | prim_expr_noid {$1}
-| postfix_expr LBRACK expr RBRACK
+| postfix_expr "[" expr "]"
   { node (PE_Index ($1, $3)) $loc }
-| postfix_expr LPAREN separated_list(COMMA, assign_expr) RPAREN
+| postfix_expr "(" separated_list(",", assign_expr) ")"
   { node (PE_Call ($1, Array.of_list $3)) $loc }
-| postfix_expr DOT ident_loc
+| postfix_expr "." ident_loc
   { node (PE_Dot ($1, $3)) $loc }
-| postfix_expr ARROW ident_loc
+| postfix_expr "->" ident_loc
   { node (PE_Arrow ($1, $3)) $loc }
-| postfix_expr PLUSPLUS
+| postfix_expr "++"
   { node (PE_IncDec (POST_INC, $1)) $loc }
-| postfix_expr MINUSMINUS
+| postfix_expr "--"
   { node (PE_IncDec (POST_DEC, $1)) $loc }
 
 postfix_expr:
@@ -220,15 +230,15 @@ postfix_expr:
 
 postfix_expr_cast:
 | prim_expr_cast {$1}
-| postfix_expr_cast LBRACK expr RBRACK
+| postfix_expr_cast "[" expr "]"
   { node (PE_Index ($1, $3)) $loc }
-| postfix_expr_cast DOT ident_loc
+| postfix_expr_cast "." ident_loc
   { node (PE_Dot ($1, $3)) $loc }
-| postfix_expr_cast ARROW ident_loc
+| postfix_expr_cast "->" ident_loc
   { node (PE_Arrow ($1, $3)) $loc }
-| postfix_expr_cast PLUSPLUS
+| postfix_expr_cast "++"
   { node (PE_IncDec (POST_INC, $1)) $loc }
-| postfix_expr_cast MINUSMINUS
+| postfix_expr_cast "--"
   { node (PE_IncDec (POST_DEC, $1)) $loc }
 
 (* 6.5.3
@@ -246,11 +256,11 @@ postfix_expr_cast:
 unary_expr_common:
 | SIZEOF unary_expr
   { node (PE_SizeofE $2) $loc }
-| SIZEOF LPAREN typ RPAREN
+| SIZEOF "(" typ ")"
   { node (PE_SizeofT $3) $loc }
-| TILDE unary_expr
+| "~" unary_expr
   { node (PE_Unary (NOT, $2)) $loc }
-| BANG unary_expr
+| "!" unary_expr
   { node (PE_Unary (LOGIC_NOT, $2)) $loc }
 
 unary_expr_cast:
@@ -260,17 +270,17 @@ unary_expr_cast:
 unary_expr_noid:
 | postfix_expr_noid {$1}
 | unary_expr_common {$1}
-| PLUSPLUS unary_expr
+| "++" unary_expr
   { node (PE_IncDec (PRE_INC, $2)) $loc }
-| MINUSMINUS unary_expr
+| "--" unary_expr
   { node (PE_IncDec (PRE_DEC, $2)) $loc }
-| AMP unary_expr
+| "&" unary_expr
   { node (PE_Addr $2) $loc }
-| STAR unary_expr
+| "*" unary_expr
   { node (PE_Deref $2) $loc }
-| PLUS unary_expr
+| "+" unary_expr
   { node (PE_Unary (OPLUS, $2)) $loc }
-| MINUS unary_expr
+| "-" unary_expr
   { node (PE_Unary (OMINUS, $2)) $loc }
 
 unary_expr:
@@ -284,9 +294,9 @@ unary_expr:
  *)
 cast_expr_noid:
 | unary_expr_noid {$1}
-| LPAREN typ RPAREN cast_expr
+| "(" typ ")" cast_expr
   { node (PE_Cast ($2, $4)) $loc }
-| LPAREN IDENT RPAREN unary_expr_cast
+| "(" IDENT ")" unary_expr_cast
   { let typ = node ([Typedef_Name $2], []) $loc($2) in
     node (PE_Cast (typ, $4)) $loc }
 
@@ -314,24 +324,24 @@ cast_expr:
 (* logical-OR-expression *)
 bin_expr_noid:
 | cast_expr_noid {$1}
-| bin_expr STAR    bin_expr { node (PE_Binary (MUL,        $1, $3)) $loc }
-| bin_expr SLASH   bin_expr { node (PE_Binary (DIV,        $1, $3)) $loc }
-| bin_expr PERCENT bin_expr { node (PE_Binary (MOD,        $1, $3)) $loc }
-| bin_expr PLUS    bin_expr { node (PE_Binary (ADD,        $1, $3)) $loc }
-| bin_expr MINUS   bin_expr { node (PE_Binary (SUB,        $1, $3)) $loc }
-| bin_expr LTLT    bin_expr { node (PE_Binary (LSHIFT,     $1, $3)) $loc }
-| bin_expr GTGT    bin_expr { node (PE_Binary (RSHIFT,     $1, $3)) $loc }
-| bin_expr LT      bin_expr { node (PE_Binary (LESS,       $1, $3)) $loc }
-| bin_expr GT      bin_expr { node (PE_Binary (GREATER,    $1, $3)) $loc }
-| bin_expr LTEQ    bin_expr { node (PE_Binary (LESS_EQ,    $1, $3)) $loc }
-| bin_expr GTEQ    bin_expr { node (PE_Binary (GREATER_EQ, $1, $3)) $loc }
-| bin_expr EQEQ    bin_expr { node (PE_Binary (EQUAL,      $1, $3)) $loc }
-| bin_expr BANGEQ  bin_expr { node (PE_Binary (NOT_EQUAL,  $1, $3)) $loc }
-| bin_expr AMP     bin_expr { node (PE_Binary (AND,        $1, $3)) $loc }
-| bin_expr CIRC    bin_expr { node (PE_Binary (XOR,        $1, $3)) $loc }
-| bin_expr BAR     bin_expr { node (PE_Binary (OR,         $1, $3)) $loc }
-| bin_expr AMPAMP  bin_expr { node (PE_Binary (LOGIC_AND,  $1, $3)) $loc }
-| bin_expr BARBAR  bin_expr { node (PE_Binary (LOGIC_OR,   $1, $3)) $loc }
+| bin_expr "*"  bin_expr { node (PE_Binary (MUL,        $1, $3)) $loc }
+| bin_expr "/"  bin_expr { node (PE_Binary (DIV,        $1, $3)) $loc }
+| bin_expr "%"  bin_expr { node (PE_Binary (MOD,        $1, $3)) $loc }
+| bin_expr "+"  bin_expr { node (PE_Binary (ADD,        $1, $3)) $loc }
+| bin_expr "-"  bin_expr { node (PE_Binary (SUB,        $1, $3)) $loc }
+| bin_expr "<<" bin_expr { node (PE_Binary (LSHIFT,     $1, $3)) $loc }
+| bin_expr ">>" bin_expr { node (PE_Binary (RSHIFT,     $1, $3)) $loc }
+| bin_expr "<"  bin_expr { node (PE_Binary (LESS,       $1, $3)) $loc }
+| bin_expr ">"  bin_expr { node (PE_Binary (GREATER,    $1, $3)) $loc }
+| bin_expr "<=" bin_expr { node (PE_Binary (LESS_EQ,    $1, $3)) $loc }
+| bin_expr ">=" bin_expr { node (PE_Binary (GREATER_EQ, $1, $3)) $loc }
+| bin_expr "==" bin_expr { node (PE_Binary (EQUAL,      $1, $3)) $loc }
+| bin_expr "!=" bin_expr { node (PE_Binary (NOT_EQUAL,  $1, $3)) $loc }
+| bin_expr "&"  bin_expr { node (PE_Binary (AND,        $1, $3)) $loc }
+| bin_expr "^"  bin_expr { node (PE_Binary (XOR,        $1, $3)) $loc }
+| bin_expr "|"  bin_expr { node (PE_Binary (OR,         $1, $3)) $loc }
+| bin_expr "&&" bin_expr { node (PE_Binary (LOGIC_AND,  $1, $3)) $loc }
+| bin_expr "||" bin_expr { node (PE_Binary (LOGIC_OR,   $1, $3)) $loc }
 
 bin_expr:
 | bin_expr_noid {$1}
@@ -344,7 +354,7 @@ bin_expr:
  *)
 cond_expr_noid:
 | bin_expr_noid {$1}
-| bin_expr QUEST expr COLON cond_expr
+| bin_expr "?" expr ":" cond_expr
   { node (PE_Cond ($1, $3, $5)) $loc }
 
 cond_expr:
@@ -371,16 +381,16 @@ assign_expr:
 | IDENT { node (PE_Ident $1) $loc }
 
 assign_op:
-| STAREQ    { MUL }
-| SLASHEQ   { DIV }
-| PERCENTEQ { MOD }
-| PLUSEQ    { ADD }
-| MINUSEQ   { SUB }
-| LTLTEQ    { LSHIFT }
-| GTGTEQ    { RSHIFT }
-| AMPEQ     { AND }
-| CIRCEQ    { XOR }
-| BAREQ     { OR }
+| "*="  { MUL }
+| "/="  { DIV }
+| "%="  { MOD }
+| "+="  { ADD }
+| "-="  { SUB }
+| "<<=" { LSHIFT }
+| ">>=" { RSHIFT }
+| "&="  { AND }
+| "^="  { XOR }
+| "|="  { OR }
 
 (* 6.5.17
   expression:
@@ -389,7 +399,7 @@ assign_op:
  *)
 expr_noid:
 | assign_expr_noid {$1}
-| expr COMMA assign_expr
+| expr "," assign_expr
   { node (PE_Seq ($1, $3)) $loc }
 
 expr:
@@ -423,14 +433,14 @@ expr:
     declarator '=' initializer
  *)
 decl:
-| s=decl_spec hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
-| s=fake_decl_spec hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
-| s=incomplete_decl_spec hd=init_declr_1not_tyid tl=list(preceded(COMMA, init_declr)) SEMI
+| s=decl_spec hd=init_declr tl=list(preceded(",", init_declr)) ";"
+| s=fake_decl_spec hd=init_declr tl=list(preceded(",", init_declr)) ";"
+| s=incomplete_decl_spec hd=init_declr_1not_tyid tl=list(preceded(",", init_declr)) ";"
   { (node s $loc(s), hd::tl) }
-| s1=incomplete_decl_spec_opt name=IDENT hd=init_declr_1any_id tl=list(preceded(COMMA, init_declr)) SEMI
+| s1=incomplete_decl_spec_opt name=IDENT hd=init_declr_1any_id tl=list(preceded(",", init_declr)) ";"
   { let s = { s1 with ds_type_spec = [Typedef_Name name] }
     in (node s ($startpos(s1), $endpos(name)), hd::tl) }
-| name=IDENT s2=incomplete_decl_spec hd=init_declr tl=list(preceded(COMMA, init_declr)) SEMI
+| name=IDENT s2=incomplete_decl_spec hd=init_declr tl=list(preceded(",", init_declr)) ";"
   { let s = { s2 with ds_type_spec = [Typedef_Name name] }
     in (node s ($startpos(name), $endpos(s2)), hd::tl) }
 
@@ -776,23 +786,23 @@ declr_1any_id:
   { node ($2 $1) $loc }
 
 func_declr_suffix_ansi:
-| LPAREN param_type_list RPAREN
+| "(" param_type_list ")"
   { let (decls, vararg) = $2 in
     fun d -> D_Func (d, decls, vararg) }
-| LPAREN RPAREN
+| "(" ")"
   { fun d -> D_Old_Func (d, []) }
 
 func_declr_suffix_oldstyle:
-  LPAREN hd=IDENT tl=list(preceded(COMMA, any_ident)) RPAREN
+  "(" hd=IDENT tl=list(preceded(",", any_ident)) ")"
   { fun d -> D_Old_Func (d, hd::tl) }
 
 abs_declr_suffix:
-| LBRACK q=list(type_qual) e=assign_expr? RBRACK
+| "[" q=list(type_qual) e=assign_expr? "]"
   { fun d -> D_Array (d, {ad_size_opt=e; ad_type_qual=q; ad_static_flag=false}) }
-| LBRACK STATIC q=list(type_qual) e=assign_expr RBRACK
-| LBRACK q=nonempty_list(type_qual) STATIC e=assign_expr RBRACK
+| "[" STATIC q=list(type_qual) e=assign_expr "]"
+| "[" q=nonempty_list(type_qual) STATIC e=assign_expr "]"
   { fun d -> D_Array (d, {ad_size_opt=Some e; ad_type_qual=q; ad_static_flag=true}) }
-| LBRACK q=list(type_qual) STAR RBRACK
+| "[" q=list(type_qual) "*" "]"
   { fun d -> D_Array (d, {ad_size_opt=None; ad_type_qual=q; ad_static_flag=false}) }
 | func_declr_suffix_ansi { $1 }
 
@@ -809,7 +819,7 @@ declr_suffix:
 direct_declr:
 | IDENT | TYPEIDENT
   { node (D_Base $1) $loc }
-| LPAREN declr RPAREN
+| "(" declr ")"
   { node (D_Paren $2) $loc }
 | direct_declr declr_suffix
   { node ($2 $1) $loc }
@@ -817,7 +827,7 @@ direct_declr:
 direct_declr_1not_tyid:
 | IDENT
   { node (D_Base $1) $loc }
-| LPAREN declr RPAREN
+| "(" declr ")"
   { node (D_Paren $2) $loc }
 | direct_declr_1not_tyid declr_suffix
   { node ($2 $1) $loc }
@@ -825,9 +835,9 @@ direct_declr_1not_tyid:
 param_type_list:
 | param_decl
   { ([$1], false) }
-| param_decl COMMA ELLIPSIS
+| param_decl "," "..."
   { ([$1], true) }
-| param_decl COMMA param_type_list
+| param_decl "," param_type_list
   { let decls, vararg = $3 in
     ($1::decls, vararg) }
 
@@ -851,9 +861,9 @@ param_decl:
   { (node $1 $loc($1), node (D_Base "") ($endpos, $endpos)) }
 
 ptr:
-| STAR q=list(type_qual)
+| "*" q=list(type_qual)
   { [(q, $startpos)] }
-| STAR q=list(type_qual) p=ptr
+| "*" q=list(type_qual) p=ptr
   { (q, $startpos) :: p }
 
 (* 6.7.6
@@ -891,7 +901,7 @@ indirect_abs_declr:
 direct_abs_declr:
 | IDENT | TYPEIDENT
   { node (D_Base ($1)) $loc }
-| LPAREN enclosed_abs_declr RPAREN
+| "(" enclosed_abs_declr ")"
   { node (D_Paren $2) $loc }
 | abs_declr_suffix
   { node ($1 (node (D_Base "") ($endpos, $endpos))) $loc }
@@ -899,7 +909,7 @@ direct_abs_declr:
   { node ($2 $1) $loc }
 
 direct_abs_declr_1not_any_id:
-| LPAREN enclosed_abs_declr RPAREN
+| "(" enclosed_abs_declr ")"
   { node (D_Paren $2) $loc }
 | abs_declr_suffix
   { node ($1 (node (D_Base "") ($endpos, $endpos))) $loc }
@@ -914,7 +924,7 @@ enclosed_abs_declr:
   { node (D_Base ($1)) $loc }
 
 enclosed_abs_declr_aux:
-| LPAREN d=enclosed_abs_declr RPAREN
+| "(" d=enclosed_abs_declr ")"
   { node (D_Paren d) $loc }
 | d=abs_declr_suffix
   { node (d (node (D_Base "") ($endpos, $endpos))) $loc }
@@ -950,8 +960,8 @@ enclosed_abs_declr_aux:
 init:
 | assign_expr
   { Init_Expr $1 }
-| LBRACE separated_nonempty_list(COMMA, init_list_item) RBRACE
-| LBRACE nonempty_list(terminated(init_list_item, COMMA)) RBRACE
+| "{" separated_nonempty_list(",", init_list_item) "}"
+| "{" nonempty_list(terminated(init_list_item, ",")) "}"
   { Init_List (node $2 $loc) }
 
 init_list_item:
@@ -963,9 +973,9 @@ init_list_item:
 designation: nonempty_list(designator) EQ { node $1 $loc }
 
 designator:
-| LBRACK const_expr RBRACK
+| "[" const_expr "]"
   { Desig_Index $2 }
-| DOT ident_loc
+| "." ident_loc
   { Desig_Field $2 }
 
 (** Statements **)
@@ -1010,10 +1020,14 @@ stmt_before_else:
     declaration
     statement
  *)
-comp_stmt: LBRACE list(block_item) RBRACE { node (PS_Block $2) $loc }
+comp_stmt: comp_stmt1 comp_stmt2 { $2 }
+
+comp_stmt1: "{" { Context.enter_scope () }
+comp_stmt2: body=list(block_item) "}"
+  { Context.leave_scope (); node (PS_Block body) $loc }
 
 block_item:
-| decl { Item_Decl $1 }
+| decl { handle_decl $1; Item_Decl $1 }
 | stmt { Item_Stmt $1 }
 
 (* 6.8.3
@@ -1021,42 +1035,42 @@ block_item:
     expression? ';'
  *)
 semicolon_terminated_stmt:
-| expr SEMI
+| expr ";"
   { node (PS_Expr $1) $loc }
-| SEMI
+| ";"
   { node PS_Null $loc }
-| DO s=stmt WHILE LPAREN e=expr RPAREN SEMI
+| DO s=stmt WHILE "(" e=expr ")" ";"
   { node (PS_Do_While (s, e)) $loc }
-| GOTO ident_loc SEMI
+| GOTO ident_loc ";"
   { node (PS_Goto $2) $loc }
-| CONTINUE SEMI
+| CONTINUE ";"
   { node PS_Continue $loc }
-| BREAK SEMI
+| BREAK ";"
   { node PS_Break $loc }
-| RETURN expr? SEMI
+| RETURN expr? ";"
   { node (PS_Return $2) $loc }
 
 stmt_terminated_stmt:
 (* labeled *)
-| name=any_ident COLON s=stmt
+| name=any_ident ":" s=stmt
   { node (PS_Labeled (s, Label name)) $loc }
-| CASE e=const_expr COLON s=stmt
+| CASE e=const_expr ":" s=stmt
   { node (PS_Labeled (s, Label_Case e)) $loc }
-| DEFAULT COLON s=stmt
+| DEFAULT ":" s=stmt
   { node (PS_Labeled (s, Label_Default)) $loc }
 (* selection *)
-| IF LPAREN e=expr RPAREN s=stmt
+| IF "(" e=expr ")" s=stmt
   { node (PS_If (e, s)) $loc }
-| IF LPAREN e=expr RPAREN s1=stmt_before_else ELSE s2=stmt
+| IF "(" e=expr ")" s1=stmt_before_else ELSE s2=stmt
   { node (PS_Ifelse (e, s1, s2)) $loc }
-| SWITCH LPAREN e=expr RPAREN s=stmt
+| SWITCH "(" e=expr ")" s=stmt
   { node (PS_Switch (e, s)) $loc }
 (* iteration *)
-| WHILE LPAREN e=expr RPAREN s=stmt
+| WHILE "(" e=expr ")" s=stmt
   { node (PS_While (e, s)) $loc }
-| FOR LPAREN e1=expr? SEMI e2=expr? SEMI e3=expr? RPAREN s=stmt
+| FOR "(" e1=expr? ";" e2=expr? ";" e3=expr? ")" s=stmt
   { node (PS_For1 (e1, e2, e3, s)) $loc }
-| FOR LPAREN d=decl e2=expr? SEMI e3=expr? RPAREN s=stmt
+| FOR "(" d=decl e2=expr? ";" e3=expr? ")" s=stmt
   { node (PS_For2 (d, e2, e3, s)) $loc }
 
 (* 6.8.4
@@ -1068,23 +1082,23 @@ stmt_terminated_stmt:
 
 stmt_terminated_stmt_before_else:
 (* labeled *)
-| name=any_ident COLON s=stmt_before_else
+| name=any_ident ":" s=stmt_before_else
   { node (PS_Labeled (s, Label name)) $loc }
-| CASE e=const_expr COLON s=stmt_before_else
+| CASE e=const_expr ":" s=stmt_before_else
   { node (PS_Labeled (s, Label_Case e)) $loc }
-| DEFAULT COLON s=stmt_before_else
+| DEFAULT ":" s=stmt_before_else
   { node (PS_Labeled (s, Label_Default)) $loc }
 (* selection *)
-| IF LPAREN e=expr RPAREN s1=stmt_before_else ELSE s2=stmt_before_else
+| IF "(" e=expr ")" s1=stmt_before_else ELSE s2=stmt_before_else
   { node (PS_Ifelse (e, s1, s2)) $loc }
-| SWITCH LPAREN e=expr RPAREN s=stmt_before_else
+| SWITCH "(" e=expr ")" s=stmt_before_else
   { node (PS_Switch (e, s)) $loc }
 (* iteration *)
-| WHILE LPAREN e=expr RPAREN s=stmt_before_else
+| WHILE "(" e=expr ")" s=stmt_before_else
   { node (PS_While (e, s)) $loc }
-| FOR LPAREN e1=expr? SEMI e2=expr? SEMI e3=expr? RPAREN s=stmt_before_else
+| FOR "(" e1=expr? ";" e2=expr? ";" e3=expr? ")" s=stmt_before_else
   { node (PS_For1 (e1, e2, e3, s)) $loc }
-| FOR LPAREN d=decl e2=expr? SEMI e3=expr? RPAREN s=stmt_before_else
+| FOR "(" d=decl e2=expr? ";" e3=expr? ")" s=stmt_before_else
   { node (PS_For2 (d, e2, e3, s)) $loc }
 
 (* 6.8.5
@@ -1118,7 +1132,7 @@ translation_unit: list(extdef) EOF {$1}
 
 extdef:
 | func_def { Func_Def $1 }
-| decl { Decl $1 }
+| decl { handle_decl $1; Decl $1 }
 
 (* 6.9.1
   function-definition:
@@ -1148,7 +1162,7 @@ func_declr:
   direct_declr func_declr_suffix
   { node ($2 $1) $loc }
 (* unnecessary, and causes conflicts *)
-(*| LPAREN func_declr RPAREN
+(*| "(" func_declr ")"
   { node (D_Paren $2) $loc }*)
 
 %inline

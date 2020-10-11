@@ -7,4 +7,4 @@
 (env (dev (flags (:standard -g -w -27))))
 (menhir
   (modules parser)
-  (flags --table --external-tokens Token --unused-tokens -v --trace))
+  (flags --table --external-tokens Token --unused-tokens -v))

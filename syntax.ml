@@ -108,6 +108,11 @@ type declarator =
 
 and param_decl = decl_spec node * declarator node
 
+let rec declarator_name = function
+  | D_Base name -> name
+  | D_Ptr (d, _) | D_Array (d, _) | D_Func (d, _, _) | D_Old_Func (d, _) | D_Paren d ->
+    declarator_name d.body
+
 type designator =
   | Desig_None
   | Desig_Index of pexpr node
