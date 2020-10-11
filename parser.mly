@@ -681,6 +681,13 @@ struct_decl:
 | s=fake_decl_spec_id_last_unsafe hd=struct_declr_after_id tl=list(preceded(",", struct_declr)) ";"
 | s=incomplete_decl_spec hd=struct_declr_(declr_1not_tyid) tl=list(preceded(",", struct_declr)) ";"
   { (node s $loc(s), hd::tl) }
+(* EXTENSION: a declaration may contain no declarators, useful for anonymous
+   structs and unions *)
+| s=decl_spec ";"
+| s=fake_decl_spec_safe ";"
+| s=fake_decl_spec_id_first ";"
+| s=incomplete_decl_spec ";" (* this is likely to be an error *)
+  { (node s $loc(s), []) }
 
 struct_declr_(declr_):
 | declr_
