@@ -116,6 +116,7 @@ let keyword_map = [
   "for"         , FOR ;
   "goto"        , GOTO ;
   "if"          , IF ;
+  "inline"      , INLINE ;
   "int"         , INT ;
   "long"        , LONG ;
   "register"    , REGISTER ;
