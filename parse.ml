@@ -6,7 +6,8 @@ type parser_config =
 
 let parse_c_file conf ic filename =
   (* let supplier = Preproc.make_supplier conf.preproc_config ic filename in *)
-  let pp_state = Preproc.init_state conf.preproc_config ic filename in
+  let pp_conf = conf.preproc_config in
+  let pp_state = Preproc.init_state pp_conf ic filename in
   let pp_parser = Preproc.make_preproc_parser pp_state in
   let module C = Context.Make() in
   let module P = Parser.Make(C) in
@@ -17,6 +18,9 @@ let parse_c_file conf ic filename =
   let menhir_supplier () =
     let tok:Preproc.token' =
       let pretok = Preproc.getsym_expand pp_state.macro_tab pp_parser in
+(*    if pp_conf.debug then
+        Format.printf "%a: %a ‘%s’@."
+          Preproc.pp_pos pretok.pos Token.pp_token pretok.kind pretok.text;*)
       let tok = { pretok with kind = Token.convert_token pretok.kind pretok.text } in
       (* recognize typedef names *)
       match tok with
@@ -43,11 +47,13 @@ let parse_c_file conf ic filename =
 
       prerr_endline "macros:";
       String_Table.iter begin fun macro_name def ->
+        Format.eprintf "%s => ‘%a’@." macro_name
+          Preproc.pp_macro_body (Preproc.macro_def_body def);
         match Preproc.macro_def_loc def with
         | Preproc.Loc_Builtin ->
-          Printf.eprintf "%s\n  predefined\n" macro_name
+          prerr_endline "  predefined";
         | Preproc.Loc_Source (fname, line) ->
-          Printf.eprintf "%s\n  defined at %s:%d\n" macro_name fname line
+          Printf.eprintf "  defined at %s:%d\n" fname line
       end pp_state.macro_tab;
 
       prerr_endline "typedef names:";

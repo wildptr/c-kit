@@ -16,14 +16,34 @@ let token_end_pos tok =
 type replace_token =
   | Verbatim of token'
   | Param of int
-  | Stringify of string * int
+  | Stringify of string(*whitespace*) * int
   | Concat of replace_token * replace_token
   | Magic_FILE
   | Magic_LINE
 
+let rec pp_replace_token f =
+  let open Format in
+  function
+  | Verbatim tok ->
+    if tok.ws <> "" then pp_print_char f ' ';
+    pp_print_string f tok.text
+  | Param i -> fprintf f "$%d" (1+i)
+  | Stringify (ws, i) ->
+    if ws <> "" then pp_print_char f ' ';
+    fprintf f "$STRING($%d)" (1+i)
+  | Concat (rtok1, rtok2) ->
+    fprintf f "$CONCAT(%a,%a)" pp_replace_token rtok1 pp_replace_token rtok2
+  | Magic_FILE -> pp_print_string f "$FILE"
+  | Magic_LINE -> pp_print_string f "$LINE"
+
 type macro_body =
   | ObjLike of replace_token list
   | FunLike of int * bool * replace_token list
+
+let pp_macro_body f = function
+  | ObjLike toklist
+  | FunLike (_, _, toklist) ->
+    List.iter (pp_replace_token f) toklist
 
 type macro_def_loc =
   | Loc_Builtin
@@ -51,7 +71,8 @@ type state = {
   user_include_dirs : string list;
   mutable input_chan : in_channel;
   mutable include_stack : (Lexing.lexbuf * in_channel * cond_stack) list;
-  max_include_depth : int
+  max_include_depth : int;
+  debug : bool
 }
 
 type config = {
@@ -83,7 +104,8 @@ let init_state conf input_chan filename =
     sys_include_dirs = conf.sys_include_dirs;
     user_include_dirs = conf.user_include_dirs;
     input_chan;
-    max_include_depth = 16 }
+    max_include_depth = 16;
+    debug = conf.debug }
 
 let pp_pos f p =
   let open Lexing in
@@ -125,7 +147,7 @@ let lex ws_buf lexbuf =
 
 let lex_debug ws_buf lexbuf =
   let tok = lex ws_buf lexbuf in
-  Format.printf "%a: %a ‘%s%s’@." pp_pos tok.pos
+  Format.printf "[lex] %a: %a ‘%s%s’@." pp_pos tok.pos
     Token.pp_token tok.kind tok.ws tok.text;
   tok
 
@@ -640,10 +662,9 @@ let handle_elif st p =
     let active = parse_cond (make_cond_expander st.macro_tab p) <> 0L in
     st.cond_stack <- (active, if active then After else Before) :: tl
 
-let handle_define st p =
+let handle_define st (dir_pos : Lexing.position) p =
   skip p;
   let name = expect_ident p in
-  let pos = st.lexbuf.lex_curr_p in
 (*Printf.eprintf "%s:%d: #define %s\n" pos.pos_fname pos.pos_lnum name;*)
   let def_body =
     match p.tok with
@@ -687,8 +708,7 @@ let handle_define st p =
       let body = parse_macro_body [] p in
       ObjLike body
   in
-  (* TODO: this location is after actual location *)
-  let def_loc = Loc_Source (pos.pos_fname, pos.pos_lnum) in
+  let def_loc = Loc_Source (dir_pos.pos_fname, dir_pos.pos_lnum) in
   H.replace st.macro_tab name (def_body, def_loc)
 
 let unget_lexeme (lexbuf : Lexing.lexbuf) =
@@ -746,7 +766,7 @@ let handle_directive st (pos : Lexing.position) dir =
   match st.cond_stack with
   | [] | (true, _) :: _ ->
     begin match p.tok.text with
-      | "define" -> handle_define st p
+      | "define" -> handle_define st pos p
       | "undef" ->
         skip p;
         let name = expect_ident p in
@@ -806,7 +826,10 @@ let make_preproc_parser st =
     let t =
       match st.cond_stack with
       | [] | (true, _) :: _ ->
-        lex st.ws_buf st.lexbuf
+        if st.debug then
+          lex_debug st.ws_buf st.lexbuf
+        else
+          lex st.ws_buf st.lexbuf
       | (false, _) :: _ ->
 (*      let lb = st.lexbuf in
         Format.eprintf "about to skip, current position: %a@." pp_pos lb.lex_curr_p;
@@ -819,7 +842,7 @@ let make_preproc_parser st =
     in
     match t.kind with
     | DIRECTIVE ->
-      let dir_pos = st.lexbuf.lex_curr_p in
+      let dir_pos = t.pos in
       Lexer.directive dir_buf st.lexbuf;
 (*    Format.eprintf "current position: %a@." pp_pos st.lexbuf.lex_curr_p; *)
       let dir = flush_buffer dir_buf in
