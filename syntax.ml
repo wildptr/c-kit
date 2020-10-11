@@ -2,6 +2,22 @@ type loc = int * int
 
 type 'a node = { body: 'a; loc: loc }
 
+(* for types and declarators *)
+
+type storage_spec =
+  | Typedef
+  | Extern
+  | Static
+  | Auto
+  | Register
+
+type func_spec =
+  | Inline
+
+type type_qual = Const | Volatile | Restrict
+
+(* for expressions *)
+
 type unop = NEG | NOT | LOGIC_NOT | OPLUS | OMINUS
 
 type binop =
@@ -15,45 +31,12 @@ type const_type = Const_Int | Const_Float | Const_Char
 
 type inc_dec = PRE_INC | PRE_DEC | POST_INC | POST_DEC
 
-(** Types **)
+(* ======================================================================== *)
+(* types, expressions, declarators *)
 
-(* declaration inside a struct *)
-type struct_decl
+type ptype = (type_spec list * type_qual list) * declarator node option
 
-type su_spec =
-  | SU0 of string
-  | SU1 of string option * struct_decl list
-
-type enumerator
-
-type enum_spec =
-  | Enum0 of string
-  | Enum1 of string option * enumerator list
-
-type type_spec =
-  | Void
-  | Char
-  | Short
-  | Int
-  | Long
-  | Float
-  | Double
-  | Signed
-  | Unsigned
-  | Bool
-  | Complex
-  | Struct of su_spec
-  | Union of su_spec
-  | Enum of enum_spec
-  | Typedef_Name of string
-
-type type_qual = Const | Volatile | Restrict
-
-type ptype = type_spec list * type_qual list
-
-(** Expressions **)
-
-type pexpr =
+and pexpr =
   | PE_Const of const_type * string
   | PE_String of string
   | PE_Ident of string
@@ -75,30 +58,12 @@ type pexpr =
   | PE_Assign_Binary of binop * pexpr node * pexpr node
   | PE_Seq of pexpr node * pexpr node
 
-(** Declarations **)
-
-type storage_spec =
-  | Typedef
-  | Extern
-  | Static
-  | Auto
-  | Register
-
-type func_spec =
-  | Inline
-
-type decl_spec =
-  { ds_stor : storage_spec list;
-    ds_type_spec : type_spec list;
-    ds_type_qual : type_qual list;
-    ds_func_spec : func_spec list }
-
-type array_declarator_attr =
+and array_declarator_attr =
   { ad_size_opt : pexpr node option;
     ad_type_qual : type_qual list;
     ad_static_flag : bool }
 
-type declarator =
+and declarator =
   | D_Base of string
   | D_Ptr of declarator node * type_qual list
   | D_Array of declarator node * array_declarator_attr
@@ -107,6 +72,47 @@ type declarator =
   | D_Paren of declarator node
 
 and param_decl = decl_spec node * declarator node
+
+and su_spec =
+  | SU0 of string node
+  | SU1 of string node option * struct_decl list
+
+and enumerator = string node * pexpr node option
+
+and enum_spec =
+  | Enum0 of string node
+  | Enum1 of string node option * enumerator list
+
+and type_spec =
+  | Void
+  | Char
+  | Short
+  | Int
+  | Long
+  | Float
+  | Double
+  | Signed
+  | Unsigned
+  | Bool
+  | Complex
+  | Struct of su_spec
+  | Union of su_spec
+  | Enum of enum_spec
+  | Typedef_Name of string
+
+and decl_spec =
+  { ds_stor : storage_spec list;
+    ds_type_spec : type_spec list;
+    ds_type_qual : type_qual list;
+    ds_func_spec : func_spec list }
+
+(* The standard says specifier-qualifier-list rather than
+   declaration-specifiers *)
+and struct_decl = decl_spec node * struct_declarator list
+
+and struct_declarator = declarator node option * pexpr node option
+
+(* ======================================================================== *)
 
 let rec declarator_name = function
   | D_Base name -> name
@@ -122,9 +128,9 @@ type initializer_ =
   | Init_Expr of pexpr node
   | Init_List of (designator list node * initializer_) list node
 
-type decl = decl_spec node * init_declarator list
+type init_declarator = declarator node * initializer_ option
 
-and init_declarator = declarator node * initializer_ option
+type decl = decl_spec node * init_declarator list
 
 (** Statements **)
 

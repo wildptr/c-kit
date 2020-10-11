@@ -1,12 +1,13 @@
-(*let abs_pos (pos:Lexing.position) =
-  pos.pos_bol + pos.pos_cnum*)
+open Util
 
 type parser_config =
   { preproc_config: Preproc.config;
     typenames: string list }
 
 let parse_c_file conf ic filename =
-  let supplier = Preproc.make_supplier conf.preproc_config ic filename in
+  (* let supplier = Preproc.make_supplier conf.preproc_config ic filename in *)
+  let pp_state = Preproc.init_state conf.preproc_config ic filename in
+  let pp_parser = Preproc.make_preproc_parser pp_state in
   let module C = Context.Make() in
   let module P = Parser.Make(C) in
   C.initialize_typename_table conf.typenames;
@@ -14,13 +15,15 @@ let parse_c_file conf ic filename =
     ref Preproc.{ kind = EOF; text=""; pos = Lexing.dummy_pos; ws="" }
   in
   let menhir_supplier () =
-    (* recognize typedef names *)
     let tok:Preproc.token' =
-      match supplier () with
-      | { kind = IDENT name; _ } as tok ->
+      let pretok = Preproc.getsym_expand pp_state.macro_tab pp_parser in
+      let tok = { pretok with kind = Token.convert_token pretok.kind pretok.text } in
+      (* recognize typedef names *)
+      match tok with
+      | { kind = IDENT name; _ } ->
         if C.is_typename name then
           { tok with kind = TYPEIDENT name } else tok
-      | tok -> tok
+      | _ -> tok
     in
     current_token := tok;
     let pos0 = tok.pos in
@@ -37,9 +40,26 @@ let parse_c_file conf ic filename =
   let init_checkpoint = P.Incremental.translation_unit init_pos in
   let handle_error = function
     | P.MenhirInterpreter.HandlingError env ->
-      let pos = (!current_token).pos in
-      Printf.eprintf "%s:%d:%d: syntax error\n" pos.pos_fname
-        pos.pos_lnum (pos.pos_cnum - pos.pos_bol)
+
+      prerr_endline "macros:";
+      String_Table.iter begin fun macro_name def ->
+        match Preproc.macro_def_loc def with
+        | Preproc.Loc_Builtin ->
+          Printf.eprintf "%s\n  predefined\n" macro_name
+        | Preproc.Loc_Source (fname, line) ->
+          Printf.eprintf "%s\n  defined at %s:%d\n" macro_name fname line
+      end pp_state.macro_tab;
+
+      prerr_endline "typedef names:";
+      String_Set.iter prerr_endline (C.all_typenames ());
+
+      let tok = !current_token in
+      let pos = tok.pos in
+
+      Printf.eprintf "%s:%d:%d: syntax error at ‘%s’, in state %d\n"
+        pos.pos_fname pos.pos_lnum (pos.pos_cnum - pos.pos_bol)
+        tok.text (P.MenhirInterpreter.current_state_number env)
+
     | _ -> failwith "?"
   in
   P.MenhirInterpreter.loop_handle ignore handle_error menhir_supplier init_checkpoint

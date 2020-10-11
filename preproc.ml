@@ -1,11 +1,6 @@
 open Token
 
-module H =
-  Hashtbl.Make(struct
-    type t = string
-    let equal = (=)
-    let hash = Hashtbl.hash
-  end)
+module H = Util.String_Table
 
 type token' = {
   kind : token;
@@ -26,9 +21,18 @@ type replace_token =
   | Magic_FILE
   | Magic_LINE
 
-type macro_def =
+type macro_body =
   | ObjLike of replace_token list
   | FunLike of int * bool * replace_token list
+
+type macro_def_loc =
+  | Loc_Builtin
+  | Loc_Source of string(*filename*) * int(*line*)
+
+type macro_def = macro_body * macro_def_loc
+
+let macro_def_body : macro_def -> macro_body = fst
+let macro_def_loc : macro_def -> macro_def_loc = snd
 
 type cond_state =
   | Before      (* before true branch *)
@@ -65,10 +69,10 @@ let init_state conf input_chan filename =
     let r kind text =
       Verbatim { kind; text; ws = ""; pos = Lexing.dummy_pos }
     in [
-      "__FILE__", ObjLike [Magic_FILE];
-      "__LINE__", ObjLike [Magic_LINE];
-      "__STDC__", ObjLike [r (INT_LIT "1") "1"];
-      "__STDC_VERSION__", ObjLike [r (INT_LIT "199901L") "199901L"];
+      "__FILE__", (ObjLike [Magic_FILE], Loc_Builtin);
+      "__LINE__", (ObjLike [Magic_LINE], Loc_Builtin);
+      "__STDC__", (ObjLike [r (INT_LIT "1") "1"], Loc_Builtin);
+      "__STDC_VERSION__", (ObjLike [r (INT_LIT "199901L") "199901L"], Loc_Builtin);
     ] |> List.to_seq |> H.of_seq
   in
   { ws_buf = Buffer.create 1024;
@@ -307,7 +311,7 @@ let rec find_include_file search_path filename =
   | [] -> Printf.eprintf "%s not found\n" filename; None
   | hd :: tl ->
     let path = hd ^ filename in
-    Printf.eprintf "trying %s\n" path;
+(*  Printf.eprintf "trying %s\n" path;*)
     if Sys.file_exists path then Some path else
       find_include_file tl filename
 
@@ -467,7 +471,7 @@ let rec unget_token_list p = function
 
 let subject_to_expansion macro_tab p text noexp =
   not (List.mem text noexp) &&
-  match H.find macro_tab text with
+  match macro_def_body (H.find macro_tab text) with
   | ObjLike _ -> true
   | FunLike _ -> p.tok.kind = LPAREN
   | exception Not_found -> false
@@ -534,7 +538,7 @@ and expand_ident macro_tab p t : unit =
     end
   in
   let arg_tab, body =
-    match H.find macro_tab s with
+    match macro_def_body (H.find macro_tab s) with
     | ObjLike body -> [||], body
     | FunLike (arity, is_vararg, body) ->
       assert (p.tok.kind = LPAREN);
@@ -640,8 +644,8 @@ let handle_define st p =
   skip p;
   let name = expect_ident p in
   let pos = st.lexbuf.lex_curr_p in
-  Printf.eprintf "%s:%d: #define %s\n" pos.pos_fname pos.pos_lnum name;
-  let def =
+(*Printf.eprintf "%s:%d: #define %s\n" pos.pos_fname pos.pos_lnum name;*)
+  let def_body =
     match p.tok with
     | { kind = LPAREN; ws = ""; _ } ->
       skip p;
@@ -683,7 +687,9 @@ let handle_define st p =
       let body = parse_macro_body [] p in
       ObjLike body
   in
-  H.replace st.macro_tab name def
+  (* TODO: this location is after actual location *)
+  let def_loc = Loc_Source (pos.pos_fname, pos.pos_lnum) in
+  H.replace st.macro_tab name (def_body, def_loc)
 
 let unget_lexeme (lexbuf : Lexing.lexbuf) =
   lexbuf.lex_curr_pos <- lexbuf.lex_start_pos;
@@ -744,8 +750,8 @@ let handle_directive st (pos : Lexing.position) dir =
       | "undef" ->
         skip p;
         let name = expect_ident p in
-        let pos = st.lexbuf.lex_curr_p in
-        Printf.eprintf "%s:%d: #undef %s\n" pos.pos_fname pos.pos_lnum name;
+(*      let pos = st.lexbuf.lex_curr_p in
+        Printf.eprintf "%s:%d: #undef %s\n" pos.pos_fname pos.pos_lnum name;*)
         expect_eof p;
         H.remove st.macro_tab name
       | "ifdef" ->

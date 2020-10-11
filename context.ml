@@ -6,6 +6,8 @@ module type S = sig
   val enter_scope : unit -> unit
   val leave_scope : unit -> unit
   val register_typename : string -> unit
+  val assume_typename : string -> unit
+  val all_typenames : unit -> String_Set.t
 end
 
 module Make () : S = struct
@@ -27,8 +29,17 @@ module Make () : S = struct
     typename_stack := List.tl !typename_stack
 
   let register_typename name =
+    Printf.eprintf "typedef name: %s\n" name;
     let set = List.hd !typename_stack in
-    (*Printf.eprintf "typedef name: %s\n" name;*)
     set := String_Set.add name !set
+
+  let assume_typename name =
+    Printf.eprintf "assumed typedef name: %s\n" name;
+    let set = List.hd !typename_stack in
+    set := String_Set.add name !set
+
+  let all_typenames () =
+    List.fold_left (fun acc set -> String_Set.union acc !set)
+      String_Set.empty !typename_stack
 
 end

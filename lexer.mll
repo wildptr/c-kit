@@ -261,7 +261,7 @@ and string s = parse
 (* Beware backslash-newline and trailing multi-line comments. *)
 and directive buf = parse
 | "\\\n"
-  { directive buf lexbuf }
+    { next_line lexbuf; directive buf lexbuf }
 | "/*"
   { comment' lexbuf; directive buf lexbuf }
 | '\n'
