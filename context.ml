@@ -8,38 +8,62 @@ module type S = sig
   val register_typename : string -> unit
   val assume_typename : string -> unit
   val all_typenames : unit -> String_Set.t
+  val register_variable_name : string -> unit
 end
 
+type name_kind = Type | Variable
+
 module Make () : S = struct
-  let typename_stack : String_Set.t ref list ref = ref []
+  let name_stack : name_kind String_Map.t ref list ref = ref []
 
   let is_typename name =
     let rec lookup = function
       | [] -> false
-      | set::stack -> String_Set.mem name !set || lookup stack
-    in lookup !typename_stack
+      | map::stack ->
+        begin match String_Map.find_opt name !map with
+          | None -> lookup stack
+          | Some Type -> true
+          | Some Variable -> false
+        end
+    in lookup !name_stack
 
   let initialize_typename_table init_typenames =
-    typename_stack := [ref (String_Set.of_list init_typenames)]
+    let seq =
+      Seq.map (fun name -> (name, Type)) (List.to_seq init_typenames)
+    in
+    name_stack := [ref (String_Map.of_seq seq)]
 
   let enter_scope () =
-    typename_stack := ref (String_Set.empty) :: !typename_stack
+    name_stack := ref (String_Map.empty) :: !name_stack
 
   let leave_scope () =
-    typename_stack := List.tl !typename_stack
+    name_stack := List.tl !name_stack
 
   let register_typename name =
     Printf.eprintf "typedef name: %s\n" name;
-    let set = List.hd !typename_stack in
-    set := String_Set.add name !set
-
-  let assume_typename name =
-    Printf.eprintf "assumed typedef name: %s\n" name;
-    let set = List.hd !typename_stack in
-    set := String_Set.add name !set
+    let map = List.hd !name_stack in
+    map := String_Map.add name Type !map
 
   let all_typenames () =
-    List.fold_left (fun acc set -> String_Set.union acc !set)
-      String_Set.empty !typename_stack
+    List.fold_right begin fun map acc ->
+      String_Map.fold begin fun name kind acc ->
+        match kind with
+        | Type -> String_Set.add name acc
+        | Variable -> String_Set.remove name acc
+      end !map acc
+    end !name_stack String_Set.empty
+
+  let assume_typename name =
+(*  all_typenames () |> String_Set.iter begin fun name ->
+      Printf.eprintf "  %s\n" name
+    end;*)
+    Printf.eprintf "assumed typedef name: %s\n" name;
+    let map = List.hd !name_stack in
+    map := String_Map.add name Type !map
+
+  let register_variable_name name =
+    Printf.eprintf "variable name: %s\n" name;
+    let map = List.hd !name_stack in
+    map := String_Map.add name Variable !map
 
 end

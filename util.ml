@@ -7,5 +7,6 @@ module String_Table =
     end)
 
 module String_Set = Set.Make(String)
+module String_Map = Map.Make(String)
 
 let default x = function None -> x | Some y -> y

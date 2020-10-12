@@ -14,11 +14,14 @@ let contains_typedef declspec =
   List.mem Typedef declspec.ds_stor
 
 let handle_decl (ds_node, init_declr_list) =
-  if contains_typedef ds_node.body then
-    List.iter begin fun (declr, _) ->
-      let name = declarator_name declr.body in
+  let is_typedef = contains_typedef ds_node.body in
+  List.iter begin fun (declr, _) ->
+    let name = declarator_name declr.body in
+    if is_typedef then
       Ctx.register_typename name
-    end init_declr_list
+    else
+      Ctx.register_variable_name name
+  end init_declr_list
 
 %}
 
@@ -1108,11 +1111,12 @@ stmt_before_else:
     declaration
     statement
  *)
-comp_stmt: comp_stmt1 comp_stmt2 { $2 }
+comp_stmt: comp_stmt_start comp_stmt_body "}" {$2}
 
-comp_stmt1: "{" { Ctx.enter_scope () }
-comp_stmt2: body=list(block_item) "}"
-  { Ctx.leave_scope (); node (PS_Block body) $loc }
+comp_stmt_start: "{" { Ctx.enter_scope () }
+
+comp_stmt_body: list(block_item)
+  { Ctx.leave_scope (); node (PS_Block $1) $loc }
 
 block_item:
 | decl { handle_decl $1; Item_Decl $1 }
