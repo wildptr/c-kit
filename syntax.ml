@@ -64,7 +64,7 @@ and array_declarator_attr =
     ad_static_flag : bool }
 
 and declarator =
-  | D_Base of string
+  | D_Base of string option
   | D_Ptr of declarator node * type_qual list
   | D_Array of declarator node * array_declarator_attr
   | D_Func of declarator node * param_decl list * bool(*vararg*)

@@ -1,17 +1,16 @@
 open Util
 
+type name_kind = Type | Variable
+
 module type S = sig
   val is_typename : string -> bool
   val initialize_typename_table : string list -> unit
   val enter_scope : unit -> unit
   val leave_scope : unit -> unit
-  val register_typename : string -> unit
+  val register_name : name_kind -> string -> unit
   val assume_typename : string -> unit
   val all_typenames : unit -> String_Set.t
-  val register_variable_name : string -> unit
 end
-
-type name_kind = Type | Variable
 
 module Make () : S = struct
   let name_stack : name_kind String_Map.t ref list ref = ref []
@@ -39,10 +38,11 @@ module Make () : S = struct
   let leave_scope () =
     name_stack := List.tl !name_stack
 
-  let register_typename name =
-    Printf.eprintf "typedef name: %s\n" name;
+  let register_name kind name =
+    Printf.eprintf "%s name: %s\n"
+      (match kind with Type -> "typedef" | Variable -> "variable") name;
     let map = List.hd !name_stack in
-    map := String_Map.add name Type !map
+    map := String_Map.add name kind !map
 
   let all_typenames () =
     List.fold_right begin fun map acc ->
@@ -60,10 +60,5 @@ module Make () : S = struct
     Printf.eprintf "assumed typedef name: %s\n" name;
     let map = List.hd !name_stack in
     map := String_Map.add name Type !map
-
-  let register_variable_name name =
-    Printf.eprintf "variable name: %s\n" name;
-    let map = List.hd !name_stack in
-    map := String_Map.add name Variable !map
 
 end
