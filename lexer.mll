@@ -22,6 +22,7 @@ type pos = {
   mutable cnum : int
 }
 
+(* handles "\n" properly *)
 let add_whitespace b lexbuf =
   let ws = lexeme lexbuf in
   Buffer.add_string b ws;
@@ -217,14 +218,14 @@ rule token s = parse
 | eof           { EOF }
 | "##"          { HASHHASH }
 | '#'           { HASH }
-| _             { UNKNOWN }
+| _             { INVALID }
 
 and comment s = parse
 | "*/"          { add_whitespace s lexbuf }
 | eof           { () }
 | _             { add_whitespace s lexbuf; comment s lexbuf }
 
-(* Does not record whitespace. Used in [directive] and [skip_to_directive]. *)
+(* Does not record whitespace. Used in [skip_to_directive]. *)
 and comment' = parse
 | "*/"          { () }
 | eof           { () }
@@ -263,7 +264,7 @@ and directive buf = parse
 | "\\\n"
     { next_line lexbuf; directive buf lexbuf }
 | "/*"
-  { comment' lexbuf; directive buf lexbuf }
+  { add_whitespace buf lexbuf; comment buf lexbuf; directive buf lexbuf }
 | '\n'
   { next_line lexbuf }
 | ([^'\n' '\\' '/']+) as s

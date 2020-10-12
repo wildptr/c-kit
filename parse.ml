@@ -4,10 +4,27 @@ type parser_config =
   { preproc_config: Preproc.config;
     typenames: string list }
 
-let parse_c_file conf ic filename =
-  (* let supplier = Preproc.make_supplier conf.preproc_config ic filename in *)
+let preprocess_c_file conf inchan filename =
+  let supplier = Preproc.make_supplier conf inchan filename in
+  let rec loop last_text =
+    let tok = supplier () in
+    if tok.kind = EOF then print_string tok.ws
+    else begin
+      if tok.ws = "" then begin
+        if last_text <> "" then begin
+          let concat_tok, _ = Preproc.parse_token (last_text ^ tok.text) in
+          if String.length concat_tok.text > String.length last_text then print_char ' '
+        end
+      end else print_string tok.ws;
+      print_string tok.text;
+      loop tok.text
+    end
+  in loop ""
+
+let parse_c_file conf inchan filename =
+  (* let supplier = Preproc.make_supplier conf.preproc_config inchan filename in *)
   let pp_conf = conf.preproc_config in
-  let pp_state = Preproc.init_state pp_conf ic filename in
+  let pp_state = Preproc.init_state pp_conf inchan filename in
   let pp_parser = Preproc.make_preproc_parser pp_state in
   let module C = Context.Make() in
   let module P = Parser.Make(C) in
@@ -47,12 +64,28 @@ let parse_c_file conf ic filename =
 
       prerr_endline "macros:";
       String_Table.iter begin fun macro_name def ->
-        Format.eprintf "%s => ‘%a’@." macro_name
-          Preproc.pp_macro_body (Preproc.macro_def_body def);
-        match Preproc.macro_def_loc def with
-        | Preproc.Loc_Builtin ->
+        let open Preproc in
+        let body = macro_def_body def in
+        Format.eprintf "%s%a => ‘%a’@." macro_name
+          begin fun f -> function
+              ObjLike _ -> ()
+            | FunLike (n, vararg, _) ->
+              let open Format in
+              pp_print_char f '(';
+              if n=0 then
+                (if vararg then pp_print_string f "...")
+              else begin
+                pp_print_string f "$1";
+                for i=1 to n-1 do fprintf f ",$%d" (1+i) done;
+                if vararg then pp_print_string f ",..."
+              end;
+              pp_print_char f ')'
+          end body
+          pp_macro_body body;
+        match macro_def_loc def with
+        | Loc_Builtin ->
           prerr_endline "  predefined";
-        | Preproc.Loc_Source (fname, line) ->
+        | Loc_Source (fname, line) ->
           Printf.eprintf "  defined at %s:%d\n" fname line
       end pp_state.macro_tab;
 
@@ -78,7 +111,7 @@ let () =
   let sys_inc_rev = ref []
   and user_inc_rev = ref []
   and input_file = ref None
-  and debug = ref false in
+  and preproc_only = ref false in
 
   let argc = Array.length Sys.argv in
   let rec parse_argv i =
@@ -95,8 +128,11 @@ let () =
           let arg = Sys.argv.(i+1) in
           user_inc_rev := arg :: !user_inc_rev;
           parse_argv (i+2)
+        | "-E" ->
+          preproc_only := true;
+          parse_argv (i+1)
         | "-debug" ->
-          debug := true;
+          Global.debug_preproc := true;
           parse_argv (i+1)
         | _ ->
           parse_argv (i+1)
@@ -110,8 +146,7 @@ let () =
     sys_include_dirs =
       List.rev !sys_inc_rev |> List.map append_slash_if_needed;
     user_include_dirs =
-      List.rev !user_inc_rev |> List.map append_slash_if_needed;
-    debug = !debug
+      List.rev !user_inc_rev |> List.map append_slash_if_needed
   } in
 
   let chan, filename =
@@ -119,8 +154,12 @@ let () =
     | None -> (stdin, "<stdin>")
     | Some path -> (open_in path, path)
   in
-  let conf =
-    { preproc_config; typenames = [] }
-  in
-  let _ = parse_c_file conf chan filename in
+  if !preproc_only then
+    preprocess_c_file preproc_config chan filename
+  else begin
+    let conf =
+      { preproc_config; typenames = [] }
+    in
+    parse_c_file conf chan filename |> ignore
+  end;
   if input_file <> None then close_in chan

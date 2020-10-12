@@ -30,7 +30,7 @@ let handle_decl (ds_node, init_declr_list) =
 %token DIRECTIVE
 %token HASHHASH
 %token HASH
-%token UNKNOWN
+%token INVALID
 
 %token <string> IDENT
 %token <string> TYPEIDENT

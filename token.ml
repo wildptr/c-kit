@@ -53,7 +53,7 @@ type token =
   | DOT
   | HASH
   | HASHHASH
-  | UNKNOWN
+  | INVALID
   | DIRECTIVE
   | IDENT of string
   | TYPEIDENT of string
