@@ -1111,9 +1111,9 @@ stmt_before_else:
     declaration
     statement
  *)
-comp_stmt: comp_stmt_start comp_stmt_body "}" {$2}
+comp_stmt: comp_stmt_start "{" body=comp_stmt_body "}" {body}
 
-comp_stmt_start: "{" { Ctx.enter_scope () }
+comp_stmt_start: { Ctx.enter_scope () }
 
 comp_stmt_body: list(block_item)
   { Ctx.leave_scope (); node (PS_Block $1) $loc }
