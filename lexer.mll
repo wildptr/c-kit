@@ -262,7 +262,7 @@ and string s = parse
 (* Beware backslash-newline and trailing multi-line comments. *)
 and directive buf = parse
 | "\\\n"
-    { next_line lexbuf; directive buf lexbuf }
+  { next_line lexbuf; directive buf lexbuf }
 | "/*"
   { add_whitespace buf lexbuf; comment buf lexbuf; directive buf lexbuf }
 | '\n'
@@ -271,6 +271,7 @@ and directive buf = parse
   { Buffer.add_string buf s; directive buf lexbuf }
 | ('\\' | '/') as c
   { Buffer.add_char buf c; directive buf lexbuf }
+| eof {()} (* prevent crash on malformed input *)
 
 and include_file = parse
 | blank         { include_file lexbuf }

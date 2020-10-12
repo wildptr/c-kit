@@ -893,7 +893,9 @@ let handle_directive st (pos : Lexing.position) dir =
         in
         st.cond_stack <- (active, if active then After else Before) :: st.cond_stack
       | "warning" -> () (* TODO *)
-      | "error" -> () (* TODO *)
+      | "error" ->
+        let message_offset = String.length p.tok.ws + String.length p.tok.text in
+        error pos ("#error" ^ String.sub dir message_offset (String.length dir - message_offset))
       | "" -> () (* null directive *)
       | _ -> error p.tok.pos "invalid directive"
     end
@@ -905,7 +907,7 @@ let handle_directive st (pos : Lexing.position) dir =
       | "else" -> handle_else st p
       | "endif" -> handle_endif st p
       | _ -> ()
-      (*       | d -> Format.eprintf "skipping directive %s@." d *)
+(*    | d -> Format.eprintf "skipping directive %s@." d *)
     end
 
 let make_preproc_parser st =
