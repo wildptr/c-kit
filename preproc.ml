@@ -308,6 +308,8 @@ let noexp_list = function
   | { kind = PREIDENT l; _ } -> l
   | _ -> []
 
+exception Invalid_Token
+
 let concat_token pos t1 t2 =
   let text = t1.text ^ t2.text in
   match parse_token_strict text with
@@ -318,8 +320,7 @@ let concat_token pos t1 t2 =
       | _ -> { tok with pos }
     end
   | None ->
-    (*error pos (Printf.sprintf "not a valid token: ‘%s’" text)*)
-    { kind = INVALID; text; pos; ws = "" }
+    raise Invalid_Token
 
 let mark_token macro_name = function
   | { kind = PREIDENT l; _ } as t ->
@@ -374,10 +375,19 @@ let rec subst_token (macro_name, noexp, pos as token_info)
         arr.(0) <- Token { tok with ws="" }; arr
       | Some i, Some j ->
         let [@warning "-8"] Token tok1, Token tok2 = (u1'.(i), u2'.(j)) in
-        let arr = Array.make (i + (len_right - j)) (Whitespace "") in
-        Array.blit u1' 0 arr 0 i;
-        Array.blit u2' j arr i (len_right - j);
-        arr.(i) <- Token (concat_token pos tok1 tok2); arr
+        begin
+          try
+            let new_tok = concat_token pos tok1 tok2 in
+            let arr = Array.make (i + (len_right - j)) (Whitespace "") in
+            Array.blit u1' 0 arr 0 i;
+            Array.blit u2' j arr i (len_right - j);
+            arr.(i) <- Token new_tok; arr
+          with Invalid_Token ->
+            report_error tok1.pos
+              (Printf.sprintf "concatenating ‘%s’ and ‘%s’ does not yield a valid token"
+                 tok1.text tok2.text);
+            Array.concat [u1';u2']
+        end
     end
   | Magic_FILE ->
     let s = pos.pos_fname in
