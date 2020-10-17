@@ -8,16 +8,21 @@ let preprocess_c_file conf inchan filename =
   let supplier = Preproc.make_supplier conf inchan filename in
   let rec loop last_text =
     let tok = supplier () in
-    if tok.kind = EOF then print_string tok.ws
-    else begin
-      if tok.ws = "" then begin
+    begin
+      (* emit an extra space if necessary *)
+      if tok.ws = "" || tok.ws.[0] = '/' then begin
         if last_text <> "" then begin
-          let concat_tok, _ = Preproc.parse_token (last_text ^ tok.text) in
-          if String.length concat_tok.text > String.length last_text then print_char ' '
+          let concat_tok, _ = Preproc.parse_token (last_text ^ tok.ws ^ tok.text) in
+          if String.length concat_tok.ws > 0 ||
+             String.length concat_tok.text > String.length last_text then
+            print_char ' '
         end
-      end else print_string tok.ws;
-      print_string tok.text;
-      loop tok.text
+      end;
+      print_string tok.ws;
+      if tok.kind <> EOF then begin
+        print_string tok.text;
+        loop tok.text
+      end
     end
   in loop ""
 
